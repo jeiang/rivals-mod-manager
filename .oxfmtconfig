@@ -1,0 +1,13 @@
+# oxlint.config
+{
+  "rules": {
+    "no-unused-vars": "warn",
+    "no-missing-imports": "error"
+  }
+}
+
+# oxfmt.config
+{
+  "formatOnSave": true,
+  "ignorePatterns": ["**/node_modules/**"]
+}
