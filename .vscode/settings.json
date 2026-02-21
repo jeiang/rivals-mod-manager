@@ -9,5 +9,8 @@
   },
   "[typescriptreact]": {
     "editor.defaultFormatter": "oxc.oxc-vscode"
-  }
+  },
+  "rust-analyzer.linkedProjects": [
+    "src-tauri/Cargo.toml"
+  ]
 }

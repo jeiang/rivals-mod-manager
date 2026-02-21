@@ -6,9 +6,11 @@ import Main from "./pages/Main";
 
 render(
   () => (
-    <Router>
-      <Route path="/" component={Main} />
-    </Router>
+    <main class="h-screen w-full">
+      <Router>
+        <Route path="/" component={Main} />
+      </Router>
+    </main>
   ),
   document.getElementById("root") as HTMLElement,
 );

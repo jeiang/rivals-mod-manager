@@ -1,35 +1,47 @@
-import { createSignal } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
+import { For, Show, createSignal, onMount } from "solid-js";
+import ResizableSidebar from "../components/ResizableSidebar";
 
 function Main() {
-  const [name, setName] = createSignal("");
-  const [inputValue, setInputValue] = createSignal("");
-  const [greetMsg, setGreetMsg] = createSignal("");
+  const [categories, setCategories] = createSignal<string[]>([]);
+  const [isLoading, setIsLoading] = createSignal(true);
+  const [error, setError] = createSignal<string | null>(null);
 
-  const handleSubmit = async (event: SubmitEvent) => {
-    event.preventDefault();
-    setName(inputValue());
-    setGreetMsg(await invoke("greet", { name: name() }));
-  };
+  onMount(async () => {
+    try {
+      const results = await invoke<string[]>("get_categories");
+      setCategories(results);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setError(message);
+    } finally {
+      setIsLoading(false);
+    }
+  });
 
   return (
-    <main class="w-full h-full flex items-center justify-center flex-col">
-      <h1>Hello, world</h1>
-      <p>Sample app i guess</p>
-      <form class="mt-4 flex gap-2" onSubmit={handleSubmit}>
-        <input
-          type="text"
-          value={inputValue()}
-          onInput={(event) => setInputValue(event.currentTarget.value)}
-          placeholder="Enter name"
-          class="border rounded px-2 py-1"
-        />
-        <button type="submit" class="border rounded px-3 py-1">
-          Set name
-        </button>
-      </form>
-      <p class="mt-2">{greetMsg()}</p>
-    </main>
+    <ResizableSidebar
+      sidebar={
+        <div class="space-y-3">
+          <h2 class="text-lg font-semibold">categories</h2>
+          <Show when={isLoading()}>
+            <p class="text-sm text-zinc-500">Loading categories...</p>
+          </Show>
+          <Show when={error()}>
+            {(message) => <p class="text-sm text-red-500">{message()}</p>}
+          </Show>
+          <Show when={!isLoading() && !error()}>
+            <ul class="space-y-1 text-sm">
+              <li class="rounded px-2 py-1 hover:bg-zinc-100">All</li>
+              <For each={categories()}>
+                {(category) => <li class="rounded px-2 py-1 hover:bg-zinc-100">{category}</li>}
+              </For>
+            </ul>
+          </Show>
+        </div>
+      }
+      content={<h2 class="text-lg font-semibold">mods</h2>}
+    />
   );
 }
 
