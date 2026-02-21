@@ -16,6 +16,7 @@ type ModEntry = {
   path: string;
   category: string;
   files: string[];
+  last_modified: number | null;
 };
 
 type ModRow = ModEntry & {
@@ -37,6 +38,11 @@ function getUniqueFileCount(files: string[]): number {
   return stems.size;
 }
 
+function formatLastModified(unixSeconds: number | null): string {
+  if (unixSeconds === null) return "Unknown";
+  return new Date(unixSeconds * 1000).toLocaleString();
+}
+
 function Main() {
   const [categories, setCategories] = createSignal<string[]>([]);
   const [mods, setMods] = createSignal<ModEntry[]>([]);
@@ -44,14 +50,12 @@ function Main() {
   const [isLoading, setIsLoading] = createSignal(true);
   const [isModsLoading, setIsModsLoading] = createSignal(true);
   const [isRefreshing, setIsRefreshing] = createSignal(false);
+  const [isRefreshingMods, setIsRefreshingMods] = createSignal(false);
   const [categoryError, setCategoryError] = createSignal<string | null>(null);
-  const [modsError, setModsError] = createSignal<string | null>(null);
   const [toastMessage, setToastMessage] = createSignal<string | null>(null);
 
-  const showTokenToast = () => {
-    setToastMessage(
-      "MarvelRivalsAPI token must be set in Settings. A token can be gotten from https://marvelrivalsapi.com/",
-    );
+  const showToast = (message: string) => {
+    setToastMessage(message);
     window.setTimeout(() => {
       setToastMessage(null);
     }, 6000);
@@ -70,12 +74,10 @@ function Main() {
 
   const loadMods = async () => {
     try {
-      setModsError(null);
       const results = await invoke<ModEntry[]>("get_mods");
       setMods(results);
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      setModsError(message);
+      showToast(err instanceof Error ? err.message : String(err));
     }
   };
 
@@ -97,9 +99,23 @@ function Main() {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setCategoryError(message);
-      showTokenToast();
+      showToast(
+        "MarvelRivalsAPI token must be set in Settings. A token can be gotten from https://marvelrivalsapi.com/",
+      );
     } finally {
       setIsRefreshing(false);
+    }
+  };
+
+  const refreshMods = async () => {
+    try {
+      setIsRefreshingMods(true);
+      await invoke("refresh_mods");
+      await loadMods();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsRefreshingMods(false);
     }
   };
 
@@ -140,12 +156,13 @@ function Main() {
       header: "Category",
     },
     {
-      accessorKey: "path",
-      header: "Path",
-    },
-    {
       accessorKey: "uniqueFileCount",
       header: "Files",
+    },
+    {
+      accessorKey: "last_modified",
+      header: "Last Modified",
+      cell: (info) => formatLastModified(info.row.original.last_modified),
     },
   ];
 
@@ -168,9 +185,14 @@ function Main() {
       </Show>
       <TopNav
         rightContent={
-          <Button disabled={isRefreshing()} onClick={() => refreshCategories()}>
-            {isRefreshing() ? "Refreshing..." : "Refresh categories"}
-          </Button>
+          <div class="flex items-center gap-2">
+            <Button disabled={isRefreshingMods()} onClick={() => refreshMods()}>
+              {isRefreshingMods() ? "Refreshing mods..." : "Refresh mods"}
+            </Button>
+            <Button disabled={isRefreshing()} onClick={() => refreshCategories()}>
+              {isRefreshing() ? "Refreshing..." : "Refresh categories"}
+            </Button>
+          </div>
         }
       />
       <div class="min-h-0 flex-1">
@@ -200,10 +222,7 @@ function Main() {
               <Show when={isModsLoading()}>
                 <p class="text-sm text-zinc-500">Loading mods...</p>
               </Show>
-              <Show when={modsError()}>
-                {(message) => <p class="text-sm text-red-500">{message()}</p>}
-              </Show>
-              <Show when={!isModsLoading() && !modsError()}>
+              <Show when={!isModsLoading()}>
                 <div class="overflow-auto rounded border border-zinc-200">
                   <table class="min-w-full border-collapse text-left text-sm">
                     <thead class="bg-zinc-50">

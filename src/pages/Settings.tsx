@@ -109,9 +109,7 @@ function Settings() {
         <Show when={isLoading()}>
           <p class="text-sm text-zinc-500">Loading settings...</p>
         </Show>
-        <Show when={error()}>
-          {(message) => <p class="text-sm text-red-500">{message()}</p>}
-        </Show>
+        <Show when={error()}>{(message) => <p class="text-sm text-red-500">{message()}</p>}</Show>
         <Show when={saveMessage()}>
           {(message) => <p class="text-sm text-emerald-600">{message()}</p>}
         </Show>
@@ -128,7 +126,6 @@ function Settings() {
                     value={values()[field.key] ?? ""}
                     onInput={(event) => setFieldValue(field.key, event.currentTarget.value)}
                   />
-                  <p class="text-xs text-zinc-500">{field.key}</p>
                 </label>
               )}
             </For>

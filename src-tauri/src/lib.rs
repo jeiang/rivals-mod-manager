@@ -4,6 +4,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::Mutex,
+    time::UNIX_EPOCH,
 };
 
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
@@ -33,6 +34,7 @@ struct ModEntry {
     path: String,
     category: String,
     files: Vec<String>,
+    last_modified: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -106,15 +108,7 @@ fn set_setting(state: State<'_, AppState>, name: String, value: Option<String>) 
 fn get_mods(state: State<'_, AppState>) -> Result<Vec<ModEntry>, String> {
     let (mods_folder, db_rows) = {
         let state = state.lock().map_err(|e| e.to_string())?;
-        let mods_folder = query_setting(&state.db, "paths.mods")
-            .map_err(|e| e.to_string())?
-            .or_else(|| {
-                query_setting(&state.db, "paths.mods_folder")
-                    .ok()
-                    .flatten()
-            })
-            .filter(|path| !path.trim().is_empty())
-            .unwrap_or_else(default_input_mods_folder);
+        let mods_folder = resolve_mods_folder(&state.db).map_err(|e| e.to_string())?;
         let mut stmt = state
             .db
             .prepare("SELECT id, name, path, category FROM mods ORDER BY name ASC")
@@ -146,10 +140,41 @@ fn get_mods(state: State<'_, AppState>) -> Result<Vec<ModEntry>, String> {
             files: find_mod_files(&path),
             path: make_relative_to_mods_folder(&path, &mods_folder),
             category,
+            last_modified: find_latest_modified_unix(&path),
         });
     }
 
     Ok(mods)
+}
+
+#[tauri::command]
+fn refresh_mods(state: State<'_, AppState>) -> Result<(), String> {
+    let state = state.lock().map_err(|e| e.to_string())?;
+    let mods_folder = resolve_mods_folder(&state.db).map_err(|e| e.to_string())?;
+    let discovered = discover_mods(&mods_folder)?;
+
+    let tx = state.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    {
+        let mut upsert = tx
+            .prepare(
+                r#"
+                INSERT INTO mods (name, path, category)
+                VALUES (?1, ?2, 'Uncategorized')
+                ON CONFLICT(path) DO UPDATE SET
+                    name = excluded.name
+                "#,
+            )
+            .map_err(|e| e.to_string())?;
+
+        for (name, path) in discovered {
+            upsert
+                .execute(params![name, path])
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+
+    Ok(())
 }
 
 fn query_setting(conn: &Connection, name: &str) -> rusqlite::Result<Option<String>> {
@@ -160,6 +185,49 @@ fn query_setting(conn: &Connection, name: &str) -> rusqlite::Result<Option<Strin
     )
     .optional()
     .map(|value| value.flatten())
+}
+
+fn resolve_mods_folder(conn: &Connection) -> rusqlite::Result<String> {
+    query_setting(conn, "paths.mods")?
+        .or_else(|| query_setting(conn, "paths.mods_folder").ok().flatten())
+        .filter(|path| !path.trim().is_empty())
+        .map(|path| path.trim().to_string())
+        .map(Ok)
+        .unwrap_or_else(|| Ok(default_input_mods_folder()))
+}
+
+fn discover_mods(mods_folder: &str) -> Result<Vec<(String, String)>, String> {
+    let root = Path::new(mods_folder);
+    if !root.exists() {
+        return Err(format!("Mods folder does not exist: {mods_folder}"));
+    }
+    if !root.is_dir() {
+        return Err(format!("Mods folder is not a directory: {mods_folder}"));
+    }
+    let entries = fs::read_dir(root)
+        .map_err(|e| format!("Failed to read mods folder `{mods_folder}`: {e}"))?;
+
+    let mut mods = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+
+        if metadata.is_dir() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            mods.push((name, path.to_string_lossy().to_string()));
+        } else if metadata.is_file() && has_mod_extension(&path) {
+            let name = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("Unnamed Mod")
+                .to_string();
+            mods.push((name, path.to_string_lossy().to_string()));
+        }
+    }
+
+    Ok(mods)
 }
 
 fn write_setting(conn: &Connection, name: &str, value: Option<&str>) -> rusqlite::Result<()> {
@@ -200,6 +268,36 @@ fn find_mod_files(path: &str) -> Vec<String> {
     collect_mod_files(Path::new(path), &mut files);
     files.sort_unstable();
     files
+}
+
+fn find_latest_modified_unix(path: &str) -> Option<i64> {
+    find_latest_modified_path(Path::new(path))
+}
+
+fn find_latest_modified_path(path: &Path) -> Option<i64> {
+    let Ok(metadata) = path.metadata() else {
+        return None;
+    };
+
+    let mut latest = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs() as i64);
+
+    if metadata.is_dir() {
+        let Ok(entries) = fs::read_dir(path) else {
+            return latest;
+        };
+
+        for entry in entries.flatten() {
+            if let Some(candidate) = find_latest_modified_path(&entry.path()) {
+                latest = Some(latest.map_or(candidate, |current| current.max(candidate)));
+            }
+        }
+    }
+
+    latest
 }
 
 fn collect_mod_files(path: &Path, files: &mut Vec<String>) {
@@ -325,6 +423,7 @@ pub fn run() {
                 get_setting,
                 set_setting,
                 get_mods,
+                refresh_mods,
                 refresh_categories
             ])
             .setup(|app| {
@@ -372,6 +471,9 @@ fn init_db(conn: &mut Connection) -> rusqlite::Result<()> {
                 Err(err)
             }
         })?;
+
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_mods_path_unique ON mods(path)", [])
+        .map_err(|e| e)?;
 
     let default_groups = ["Uncategorized"];
 
