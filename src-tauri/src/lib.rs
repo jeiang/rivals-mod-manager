@@ -1,18 +1,26 @@
-use std::{collections::BTreeSet, error::Error, sync::Mutex};
+use std::{
+    collections::BTreeSet,
+    error::Error,
+    fs,
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
 
-use rusqlite::{params, params_from_iter, Connection};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
 
 type AppState = Mutex<AppData>;
 
-// TODO: update with sensible defaults.
-const DEFAULT_MODS_FOLDER: &str =
-    "/home/aidanp/Games/Steam/MarvelRivals/MarvelGame/Marvel/Content/Paks/~mods";
-// TODO: remove this and use a configuration value.
-const MARVEL_RIVALS_API_KEY: &str =
-    "fa25e0685957097c542fd9472c3d5cda5f1dc1a511369de77fd49ce1d8c90315";
 const HEROES_API_URL: &str = "https://marvelrivalsapi.com/api/v2/heroes";
+
+fn default_input_mods_folder() -> String {
+    std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("mods")
+        .to_string_lossy()
+        .to_string()
+}
 
 struct AppData {
     db: rusqlite::Connection,
@@ -24,6 +32,7 @@ struct ModEntry {
     name: String,
     path: String,
     category: String,
+    files: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -82,37 +91,166 @@ fn get_categories(state: State<'_, AppState>) -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
-fn get_mods(state: State<'_, AppState>) -> Result<Vec<ModEntry>, String> {
+fn get_setting(state: State<'_, AppState>, name: String) -> Result<Option<String>, String> {
     let state = state.lock().map_err(|e| e.to_string())?;
-    let mut stmt = state
-        .db
-        .prepare("SELECT id, name, path, category FROM mods ORDER BY name ASC")
-        .map_err(|e| e.to_string())?;
+    query_setting(&state.db, &name).map_err(|e| e.to_string())
+}
 
-    let rows = stmt
-        .query_map([], |row| {
-            Ok(ModEntry {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                path: row.get(2)?,
-                category: row.get(3)?,
+#[tauri::command]
+fn set_setting(state: State<'_, AppState>, name: String, value: Option<String>) -> Result<(), String> {
+    let state = state.lock().map_err(|e| e.to_string())?;
+    write_setting(&state.db, &name, value.as_deref()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_mods(state: State<'_, AppState>) -> Result<Vec<ModEntry>, String> {
+    let (mods_folder, db_rows) = {
+        let state = state.lock().map_err(|e| e.to_string())?;
+        let mods_folder = query_setting(&state.db, "paths.mods")
+            .map_err(|e| e.to_string())?
+            .or_else(|| {
+                query_setting(&state.db, "paths.mods_folder")
+                    .ok()
+                    .flatten()
             })
-        })
-        .map_err(|e| e.to_string())?;
+            .filter(|path| !path.trim().is_empty())
+            .unwrap_or_else(default_input_mods_folder);
+        let mut stmt = state
+            .db
+            .prepare("SELECT id, name, path, category FROM mods ORDER BY name ASC")
+            .map_err(|e| e.to_string())?;
 
-    let mut mods = Vec::new();
-    for row in rows {
-        mods.push(row.map_err(|e| e.to_string())?);
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+
+        let mut db_rows = Vec::new();
+        for row in rows {
+            db_rows.push(row.map_err(|e| e.to_string())?);
+        }
+        (mods_folder, db_rows)
+    };
+
+    let mut mods = Vec::with_capacity(db_rows.len());
+    for (id, name, path, category) in db_rows {
+        mods.push(ModEntry {
+            id,
+            name,
+            files: find_mod_files(&path),
+            path: make_relative_to_mods_folder(&path, &mods_folder),
+            category,
+        });
     }
 
     Ok(mods)
 }
 
+fn query_setting(conn: &Connection, name: &str) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        "SELECT value FROM settings WHERE name = ?1 LIMIT 1",
+        [name],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .optional()
+    .map(|value| value.flatten())
+}
+
+fn write_setting(conn: &Connection, name: &str, value: Option<&str>) -> rusqlite::Result<()> {
+    let updated = conn.execute(
+        "UPDATE settings SET value = ?2 WHERE name = ?1",
+        params![name, value],
+    )?;
+
+    if updated == 0 {
+        conn.execute(
+            "INSERT INTO settings (name, value) VALUES (?1, ?2)",
+            params![name, value],
+        )?;
+    }
+
+    Ok(())
+}
+
+fn make_relative_to_mods_folder(path: &str, mods_folder: &str) -> String {
+    let base = Path::new(mods_folder);
+    let value = Path::new(path);
+
+    value
+        .strip_prefix(base)
+        .ok()
+        .and_then(|relative| {
+            if relative.as_os_str().is_empty() {
+                Some(".".to_string())
+            } else {
+                Some(relative.to_string_lossy().to_string())
+            }
+        })
+        .unwrap_or_else(|| path.to_string())
+}
+
+fn find_mod_files(path: &str) -> Vec<String> {
+    let mut files = Vec::new();
+    collect_mod_files(Path::new(path), &mut files);
+    files.sort_unstable();
+    files
+}
+
+fn collect_mod_files(path: &Path, files: &mut Vec<String>) {
+    let Ok(metadata) = path.metadata() else {
+        return;
+    };
+
+    if metadata.is_file() {
+        if has_mod_extension(path) {
+            files.push(path.to_string_lossy().to_string());
+        }
+        return;
+    }
+
+    if !metadata.is_dir() {
+        return;
+    }
+
+    let Ok(entries) = fs::read_dir(path) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        collect_mod_files(&entry.path(), files);
+    }
+}
+
+fn has_mod_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| {
+            let ext = ext.to_ascii_lowercase();
+            ext == "pak" || ext == "ucas" || ext == "utoc"
+        })
+        .unwrap_or(false)
+}
+
 #[tauri::command]
 async fn refresh_categories(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    let token = {
+        let state = state.lock().map_err(|e| e.to_string())?;
+        query_setting(&state.db, "tokens.marvelrivalsapi")
+            .map_err(|e| e.to_string())?
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "Missing MarvelRivalsAPI token in settings".to_string())?
+    };
+
     let heroes = reqwest::Client::new()
         .get(HEROES_API_URL)
-        .header("x-api-key", MARVEL_RIVALS_API_KEY)
+        .header("x-api-key", token)
         .send()
         .await
         .map_err(|e| e.to_string())?
@@ -184,6 +322,8 @@ pub fn run() {
             .invoke_handler(tauri::generate_handler![
                 greet,
                 get_categories,
+                get_setting,
+                set_setting,
                 get_mods,
                 refresh_categories
             ])
@@ -217,62 +357,23 @@ fn init_db(conn: &mut Connection) -> rusqlite::Result<()> {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             path TEXT NOT NULL,
+            nexus_mod_id INTEGER,
             category TEXT NOT NULL,
             FOREIGN KEY (category) REFERENCES categories(category)
         );
         "#,
     )?;
 
-    let default_groups = [
-        "Doctor Strange",
-        "Hulk",
-        "Iron Man",
-        "Spider-Man",
-        "Luna Snow",
-        "Namor",
-        "Loki",
-        "Black Panther",
-        "Magik",
-        "Rocket Raccoon",
-        "Groot",
-        "Peni Parker",
-        "Storm",
-        "Magneto",
-        "Star-Lord",
-        "Mantis",
-        "The Punisher",
-        "Scarlet Witch",
-        "Hela",
-        "Venom",
-        "Adam Warlock",
-        "Thor",
-        "Jeff the Land Shark",
-        "Winter Soldier",
-        "Captain America",
-        "Psylocke",
-        "Moon Knight",
-        "Hawkeye",
-        "Squirrel Girl",
-        "Iron Fist",
-        "Black Widow",
-        "Cloak & Dagger",
-        "Wolverine",
-        "Mister Fantastic",
-        "Invisible Woman",
-        "Human Torch",
-        "The Thing",
-        "Emma Frost",
-        "Ultron",
-        "Phoenix",
-        "Blade",
-        "Angela",
-        "Daredevil",
-        "Gambit",
-        "Rogue",
-        "Deadpool",
-        "Elsa Bloodstone",
-        "Uncategorized",
-    ];
+    conn.execute("ALTER TABLE mods ADD COLUMN nexus_mod_id INTEGER", [])
+        .or_else(|err| {
+            if err.to_string().contains("duplicate column name") {
+                Ok(0)
+            } else {
+                Err(err)
+            }
+        })?;
+
+    let default_groups = ["Uncategorized"];
 
     let tx = conn.transaction()?;
     {
@@ -282,6 +383,7 @@ fn init_db(conn: &mut Connection) -> rusqlite::Result<()> {
             insert_group.execute([group])?;
         }
 
+        let path = default_input_mods_folder();
         tx.execute(
             r#"
             INSERT INTO settings (name, value)
@@ -290,7 +392,59 @@ fn init_db(conn: &mut Connection) -> rusqlite::Result<()> {
                 SELECT 1 FROM settings WHERE name = ?1
             )
             "#,
-            params!["paths.mods_folder", DEFAULT_MODS_FOLDER],
+            params!["paths.mods", path],
+        )?;
+        tx.execute(
+            r#"
+            INSERT INTO settings (name, value)
+            SELECT ?1, value
+            FROM settings
+            WHERE name = ?2
+            AND NOT EXISTS (
+                SELECT 1 FROM settings WHERE name = ?1
+            )
+            "#,
+            params!["paths.mods", "paths.mods_folder"],
+        )?;
+        tx.execute(
+            r#"
+            INSERT INTO settings (name, value)
+            SELECT ?1, NULL
+            WHERE NOT EXISTS (
+                SELECT 1 FROM settings WHERE name = ?1
+            )
+            "#,
+            params!["tokens.nexusmods"],
+        )?;
+        tx.execute(
+            r#"
+            INSERT INTO settings (name, value)
+            SELECT ?1, NULL
+            WHERE NOT EXISTS (
+                SELECT 1 FROM settings WHERE name = ?1
+            )
+            "#,
+            params!["tokens.marvelrivalsapi"],
+        )?;
+        tx.execute(
+            r#"
+            INSERT INTO settings (name, value)
+            SELECT ?1, NULL
+            WHERE NOT EXISTS (
+                SELECT 1 FROM settings WHERE name = ?1
+            )
+            "#,
+            params!["paths.game"],
+        )?;
+        tx.execute(
+            r#"
+            INSERT INTO settings (name, value)
+            SELECT ?1, NULL
+            WHERE NOT EXISTS (
+                SELECT 1 FROM settings WHERE name = ?1
+            )
+            "#,
+            params!["paths.downloads"],
         )?;
     }
     tx.commit()?;
