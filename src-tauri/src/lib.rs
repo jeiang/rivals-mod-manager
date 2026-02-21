@@ -1,7 +1,7 @@
-use std::{error::Error, sync::Mutex};
+use std::{collections::BTreeSet, error::Error, sync::Mutex};
 
-use rusqlite::{Connection, params};
-use serde::Serialize;
+use rusqlite::{params, params_from_iter, Connection};
+use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
 
 type AppState = Mutex<AppData>;
@@ -9,6 +9,10 @@ type AppState = Mutex<AppData>;
 // TODO: update with sensible defaults.
 const DEFAULT_MODS_FOLDER: &str =
     "/home/aidanp/Games/Steam/MarvelRivals/MarvelGame/Marvel/Content/Paks/~mods";
+// TODO: remove this and use a configuration value.
+const MARVEL_RIVALS_API_KEY: &str =
+    "fa25e0685957097c542fd9472c3d5cda5f1dc1a511369de77fd49ce1d8c90315";
+const HEROES_API_URL: &str = "https://marvelrivalsapi.com/api/v2/heroes";
 
 struct AppData {
     db: rusqlite::Connection,
@@ -20,6 +24,35 @@ struct ModEntry {
     name: String,
     path: String,
     category: String,
+}
+
+#[derive(Deserialize)]
+struct HeroApiEntry {
+    name: String,
+}
+
+fn format_category_name(raw: &str) -> String {
+    let mut result = String::with_capacity(raw.len());
+    let mut capitalize_next = true;
+
+    for ch in raw.chars() {
+        if ch == ' ' || ch == '-' {
+            capitalize_next = true;
+            result.push(ch);
+            continue;
+        }
+
+        if capitalize_next {
+            for upper in ch.to_uppercase() {
+                result.push(upper);
+            }
+            capitalize_next = false;
+        } else {
+            result.push(ch);
+        }
+    }
+
+    result
 }
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
@@ -75,6 +108,72 @@ fn get_mods(state: State<'_, AppState>) -> Result<Vec<ModEntry>, String> {
     Ok(mods)
 }
 
+#[tauri::command]
+async fn refresh_categories(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    let heroes = reqwest::Client::new()
+        .get(HEROES_API_URL)
+        .header("x-api-key", MARVEL_RIVALS_API_KEY)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .error_for_status()
+        .map_err(|e| e.to_string())?
+        .json::<Vec<HeroApiEntry>>()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let mut unique_names = BTreeSet::new();
+    for hero in heroes {
+        let name = hero.name.trim();
+        if !name.is_empty() {
+            unique_names.insert(format_category_name(name));
+        }
+    }
+    unique_names.insert("Uncategorized".to_string());
+    let categories: Vec<String> = unique_names.iter().cloned().collect();
+
+    let state = state.lock().map_err(|e| e.to_string())?;
+    let tx = state
+        .db
+        .unchecked_transaction()
+        .map_err(|e| e.to_string())?;
+    {
+        let placeholders = (1..=categories.len())
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        tx.execute(
+            r#"INSERT OR IGNORE INTO categories (category) VALUES ('Uncategorized')"#,
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+
+        let remap_mods_sql = format!(
+            "UPDATE mods SET category = 'Uncategorized' WHERE category NOT IN ({placeholders})"
+        );
+        tx.execute(&remap_mods_sql, params_from_iter(categories.iter()))
+            .map_err(|e| e.to_string())?;
+
+        let remove_old_sql =
+            format!("DELETE FROM categories WHERE category NOT IN ({placeholders})");
+        tx.execute(&remove_old_sql, params_from_iter(categories.iter()))
+            .map_err(|e| e.to_string())?;
+
+        let mut insert_category = tx
+            .prepare(r#"INSERT OR IGNORE INTO categories (category) VALUES (?1)"#)
+            .map_err(|e| e.to_string())?;
+        for category in &categories {
+            insert_category
+                .execute([category])
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+
+    Ok(categories)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     fn runner() -> Result<(), Box<dyn Error>> {
@@ -82,7 +181,12 @@ pub fn run() {
         init_db(&mut conn)?;
         tauri::Builder::default()
             .plugin(tauri_plugin_opener::init())
-            .invoke_handler(tauri::generate_handler![greet, get_categories, get_mods])
+            .invoke_handler(tauri::generate_handler![
+                greet,
+                get_categories,
+                get_mods,
+                refresh_categories
+            ])
             .setup(|app| {
                 app.manage(Mutex::new(AppData { db: conn }));
                 Ok(())
