@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeSet, HashSet},
     error::Error,
     fs,
+    io,
     path::{Path, PathBuf},
     sync::Mutex,
     time::UNIX_EPOCH,
@@ -549,6 +550,83 @@ fn set_mod_nexus_id(
     Ok(())
 }
 
+#[tauri::command]
+fn clear_mods_output(state: State<'_, AppState>) -> Result<(), String> {
+    let output_folder = {
+        let state = state.lock().map_err(|e| e.to_string())?;
+        resolve_output_mods_folder(&state.db).map_err(|e| e.to_string())?
+    };
+
+    ensure_and_clear_output_folder(&output_folder).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn apply_mods(state: State<'_, AppState>) -> Result<(), String> {
+    let (output_folder, enabled_files) = {
+        let state = state.lock().map_err(|e| e.to_string())?;
+        let output_folder = resolve_output_mods_folder(&state.db).map_err(|e| e.to_string())?;
+        let mut stmt = state
+            .db
+            .prepare(
+                r#"
+                SELECT m.path, mf.filename, mf.has_signatures
+                FROM mods m
+                JOIN mod_files mf ON mf.mod_id = m.id
+                WHERE mf.is_enabled = 1
+                ORDER BY m.id ASC, mf.filename ASC
+                "#,
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, bool>(2)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        let mut files = Vec::new();
+        for row in rows {
+            files.push(row.map_err(|e| e.to_string())?);
+        }
+        (output_folder, files)
+    };
+
+    ensure_and_clear_output_folder(&output_folder).map_err(|e| e.to_string())?;
+
+    for (mod_path, filename, has_signatures) in enabled_files {
+        let source_pak = resolve_source_file_path(Path::new(&mod_path), &filename);
+        if !source_pak.exists() {
+            continue;
+        }
+
+        let destination_pak = output_folder.join(Path::new(&filename));
+        if let Some(parent) = destination_pak.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        symlink_file(&source_pak, &destination_pak).map_err(|e| e.to_string())?;
+
+        if has_signatures {
+            for extension in ["utoc", "ucas"] {
+                let source_companion = source_pak.with_extension(extension);
+                if !source_companion.exists() {
+                    continue;
+                }
+                let destination_companion = destination_pak.with_extension(extension);
+                if let Some(parent) = destination_companion.parent() {
+                    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                }
+                symlink_file(&source_companion, &destination_companion)
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn query_setting(conn: &Connection, name: &str) -> rusqlite::Result<Option<String>> {
     conn.query_row(
         "SELECT value FROM settings WHERE name = ?1 LIMIT 1",
@@ -566,6 +644,69 @@ fn resolve_mods_folder(conn: &Connection) -> rusqlite::Result<String> {
         .map(|path| path.trim().to_string())
         .map(Ok)
         .unwrap_or_else(|| Ok(default_input_mods_folder()))
+}
+
+fn resolve_output_mods_folder(conn: &Connection) -> Result<PathBuf, String> {
+    let game_path = query_setting(conn, "paths.game")
+        .map_err(|e| e.to_string())?
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "paths.game is not set in settings".to_string())?;
+
+    Ok(Path::new(&game_path)
+        .join("MarvelGame")
+        .join("Marvel")
+        .join("Content")
+        .join("Paks")
+        .join("~mods"))
+}
+
+fn ensure_and_clear_output_folder(output_folder: &Path) -> io::Result<()> {
+    fs::create_dir_all(output_folder)?;
+    clear_directory_contents(output_folder)
+}
+
+fn clear_directory_contents(path: &Path) -> io::Result<()> {
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let entry_path = entry.path();
+        let metadata = fs::symlink_metadata(&entry_path)?;
+        if metadata.file_type().is_dir() {
+            fs::remove_dir_all(&entry_path)?;
+        } else {
+            fs::remove_file(&entry_path)?;
+        }
+    }
+    Ok(())
+}
+
+fn resolve_source_file_path(mod_path: &Path, filename: &str) -> PathBuf {
+    if mod_path.is_dir() {
+        return mod_path.join(filename);
+    }
+
+    let filename_path = Path::new(filename);
+    if filename_path.components().count() == 1 {
+        let current_name = mod_path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+        if current_name == filename {
+            return mod_path.to_path_buf();
+        }
+    }
+
+    mod_path
+        .parent()
+        .map(|parent| parent.join(filename_path))
+        .unwrap_or_else(|| mod_path.to_path_buf())
+}
+
+#[cfg(unix)]
+fn symlink_file(source: &Path, destination: &Path) -> io::Result<()> {
+    std::os::unix::fs::symlink(source, destination)
+}
+
+#[cfg(windows)]
+fn symlink_file(source: &Path, destination: &Path) -> io::Result<()> {
+    std::os::windows::fs::symlink_file(source, destination)
 }
 
 struct DiscoveredMod {
@@ -1025,6 +1166,8 @@ pub fn run() {
                 set_mod_author,
                 set_mods_author,
                 set_mod_nexus_id,
+                apply_mods,
+                clear_mods_output,
                 refresh_categories
             ])
             .setup(|app| {

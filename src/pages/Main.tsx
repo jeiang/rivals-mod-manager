@@ -112,6 +112,8 @@ function Main() {
   const [isModsLoading, setIsModsLoading] = createSignal(true);
   const [isRefreshing, setIsRefreshing] = createSignal(false);
   const [isRefreshingMods, setIsRefreshingMods] = createSignal(false);
+  const [isApplyingMods, setIsApplyingMods] = createSignal(false);
+  const [isClearingMods, setIsClearingMods] = createSignal(false);
   const [expanded, setExpanded] = createSignal<ExpandedState>({});
   const [sorting, setSorting] = createSignal<SortingState>([]);
   const [globalFilter, setGlobalFilter] = createSignal("");
@@ -203,6 +205,30 @@ function Main() {
       showToast(err instanceof Error ? err.message : String(err));
     } finally {
       setIsRefreshingMods(false);
+    }
+  };
+
+  const applyMods = async () => {
+    try {
+      setIsApplyingMods(true);
+      await invoke("apply_mods");
+      showToast("All mods are added");
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsApplyingMods(false);
+    }
+  };
+
+  const clearModsOutput = async () => {
+    try {
+      setIsClearingMods(true);
+      await invoke("clear_mods_output");
+      showToast("Mods output folder is cleared");
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsClearingMods(false);
     }
   };
 
@@ -851,7 +877,24 @@ function Main() {
           }
           content={
             <div class="space-y-3">
-              <h2 class="text-lg font-semibold">Mods</h2>
+              <div class="flex items-center justify-between gap-3">
+                <h2 class="text-lg font-semibold">Mods</h2>
+                <div class="flex items-center gap-2">
+                  <Button
+                    disabled={isApplyingMods() || isClearingMods()}
+                    onClick={() => applyMods()}
+                  >
+                    {isApplyingMods() ? "Applying..." : "Apply mods"}
+                  </Button>
+                  <Button
+                    class="bg-zinc-200 text-zinc-900 hover:bg-zinc-300"
+                    disabled={isApplyingMods() || isClearingMods()}
+                    onClick={() => clearModsOutput()}
+                  >
+                    {isClearingMods() ? "Clearing..." : "Clear mods"}
+                  </Button>
+                </div>
+              </div>
               <div>
                 <input
                   type="text"
