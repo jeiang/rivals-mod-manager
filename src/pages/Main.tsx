@@ -318,8 +318,7 @@ function Main() {
   const selectModRow = (modId: number, isMultiSelect: boolean, isRangeSelect: boolean) => {
     const orderedModIds = table
       .getRowModel()
-      .rows
-      .filter((row) => row.original.rowType === "mod")
+      .rows.filter((row) => row.original.rowType === "mod")
       .map((row) => row.original.mod.id);
 
     setSelectedModIds((current) => {
@@ -394,29 +393,29 @@ function Main() {
     mods()
       .filter((mod) => selectedCategory() === "All" || mod.category === selectedCategory())
       .map((mod) => ({
-      rowType: "mod",
-      mod,
-      id: `mod-${mod.id}`,
-      name: mod.name,
-      author: mod.author,
-      nexusModId: mod.nexus_mod_id,
-      category: mod.category,
-      uniqueFileCount: getUniqueFileCount(mod.files),
-      last_modified: mod.last_modified,
-      subRows: mod.files.map((file) => ({
-        rowType: "file",
-        modId: mod.id,
-        file,
-        id: `file-${file.id}`,
-        name: file.filename,
-        author: "",
-        nexusModId: null,
-        category: file.has_signatures ? "Signed" : "Unsigned",
-        uniqueFileCount: 1,
-        last_modified: null,
-        subRows: [],
+        rowType: "mod",
+        mod,
+        id: `mod-${mod.id}`,
+        name: mod.name,
+        author: mod.author,
+        nexusModId: mod.nexus_mod_id,
+        category: mod.category,
+        uniqueFileCount: getUniqueFileCount(mod.files),
+        last_modified: mod.last_modified,
+        subRows: mod.files.map((file) => ({
+          rowType: "file",
+          modId: mod.id,
+          file,
+          id: `file-${file.id}`,
+          name: file.filename,
+          author: "",
+          nexusModId: null,
+          category: file.has_signatures ? "Signed" : "Unsigned",
+          uniqueFileCount: 1,
+          last_modified: null,
+          subRows: [],
+        })),
       })),
-    })),
   );
 
   const authorSuggestions = createMemo<string[]>(() => {
@@ -434,7 +433,10 @@ function Main() {
       header: "",
       enableSorting: false,
       cell: (info) => (
-        <Show when={info.row.original.rowType === "mod"} fallback={<span class="inline-block w-4" />}>
+        <Show
+          when={info.row.original.rowType === "mod"}
+          fallback={<span class="inline-block w-4" />}
+        >
           <button
             type="button"
             class="inline-flex w-4 items-center justify-center text-zinc-600"
@@ -514,14 +516,17 @@ function Main() {
       id: "files",
       header: "Files",
       accessorFn: (row) => row.uniqueFileCount,
-      cell: (info) => (info.row.original.rowType === "mod" ? info.row.original.uniqueFileCount : ""),
+      cell: (info) =>
+        info.row.original.rowType === "mod" ? info.row.original.uniqueFileCount : "",
     },
     {
       id: "last_modified",
       header: "Last Modified",
       accessorFn: (row) => row.last_modified ?? 0,
       cell: (info) =>
-        info.row.original.rowType === "mod" ? formatLastModified(info.row.original.last_modified) : "",
+        info.row.original.rowType === "mod"
+          ? formatLastModified(info.row.original.last_modified)
+          : "",
     },
   ];
 
@@ -651,14 +656,7 @@ function Main() {
             >
               Set author
             </button>
-            <Show
-              when={
-                !(
-                  selectedModIds().size > 1 &&
-                  selectedModIds().has(menu().modId)
-                )
-              }
-            >
+            <Show when={!(selectedModIds().size > 1 && selectedModIds().has(menu().modId))}>
               <button
                 type="button"
                 class="block w-full px-3 py-1.5 text-left text-sm text-zinc-800 hover:bg-zinc-100"
@@ -716,10 +714,15 @@ function Main() {
                 </select>
               </label>
               <div class="flex justify-end gap-2">
-                <Button class="bg-zinc-200 text-zinc-900 hover:bg-zinc-300" onClick={() => setCategoryModal(null)}>
+                <Button
+                  class="bg-zinc-200 text-zinc-900 hover:bg-zinc-300"
+                  onClick={() => setCategoryModal(null)}
+                >
                   Cancel
                 </Button>
-                <Button onClick={() => setModsCategory(modal().modIds, modal().category)}>Save</Button>
+                <Button onClick={() => setModsCategory(modal().modIds, modal().category)}>
+                  Save
+                </Button>
               </div>
             </div>
           </div>
@@ -753,7 +756,10 @@ function Main() {
                 />
               </label>
               <div class="flex justify-end gap-2">
-                <Button class="bg-zinc-200 text-zinc-900 hover:bg-zinc-300" onClick={() => setRenameModal(null)}>
+                <Button
+                  class="bg-zinc-200 text-zinc-900 hover:bg-zinc-300"
+                  onClick={() => setRenameModal(null)}
+                >
                   Cancel
                 </Button>
                 <Button onClick={() => renameMod(modal().modId, modal().name)}>Save</Button>
@@ -793,13 +799,14 @@ function Main() {
                   }}
                 />
                 <datalist id="author-suggestions">
-                  <For each={authorSuggestions()}>
-                    {(author) => <option value={author} />}
-                  </For>
+                  <For each={authorSuggestions()}>{(author) => <option value={author} />}</For>
                 </datalist>
               </label>
               <div class="flex justify-end gap-2">
-                <Button class="bg-zinc-200 text-zinc-900 hover:bg-zinc-300" onClick={() => setAuthorModal(null)}>
+                <Button
+                  class="bg-zinc-200 text-zinc-900 hover:bg-zinc-300"
+                  onClick={() => setAuthorModal(null)}
+                >
                   Cancel
                 </Button>
                 <Button onClick={() => setModsAuthor(modal().modIds, modal().author)}>Save</Button>
@@ -837,10 +844,15 @@ function Main() {
                 />
               </label>
               <div class="flex justify-end gap-2">
-                <Button class="bg-zinc-200 text-zinc-900 hover:bg-zinc-300" onClick={() => setModIdModal(null)}>
+                <Button
+                  class="bg-zinc-200 text-zinc-900 hover:bg-zinc-300"
+                  onClick={() => setModIdModal(null)}
+                >
                   Cancel
                 </Button>
-                <Button onClick={() => setModNexusId(modal().modId, modal().nexusModId)}>Save</Button>
+                <Button onClick={() => setModNexusId(modal().modId, modal().nexusModId)}>
+                  Save
+                </Button>
               </div>
             </div>
           </div>
@@ -941,30 +953,28 @@ function Main() {
                             <For each={headerGroup.headers}>
                               {(header) => (
                                 <th class="whitespace-nowrap border-b border-zinc-200 px-3 py-2 font-semibold text-zinc-700">
-                                  {header.isPlaceholder
-                                    ? null
-                                    : (
-                                        <button
-                                          type="button"
-                                          class="inline-flex items-center gap-1"
-                                          onClick={header.column.getToggleSortingHandler()}
-                                          disabled={!header.column.getCanSort()}
-                                        >
-                                          {flexRender(
-                                            header.column.columnDef.header,
-                                            header.getContext(),
-                                          )}
-                                          <Show when={header.column.getCanSort()}>
-                                            <span class="text-xs text-zinc-500">
-                                              {header.column.getIsSorted() === "asc"
-                                                ? "▲"
-                                                : header.column.getIsSorted() === "desc"
-                                                  ? "▼"
-                                                  : ""}
-                                            </span>
-                                          </Show>
-                                        </button>
+                                  {header.isPlaceholder ? null : (
+                                    <button
+                                      type="button"
+                                      class="inline-flex items-center gap-1"
+                                      onClick={header.column.getToggleSortingHandler()}
+                                      disabled={!header.column.getCanSort()}
+                                    >
+                                      {flexRender(
+                                        header.column.columnDef.header,
+                                        header.getContext(),
                                       )}
+                                      <Show when={header.column.getCanSort()}>
+                                        <span class="text-xs text-zinc-500">
+                                          {header.column.getIsSorted() === "asc"
+                                            ? "▲"
+                                            : header.column.getIsSorted() === "desc"
+                                              ? "▼"
+                                              : ""}
+                                        </span>
+                                      </Show>
+                                    </button>
+                                  )}
                                 </th>
                               )}
                             </For>
