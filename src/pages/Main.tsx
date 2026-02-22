@@ -101,7 +101,7 @@ function Main() {
   const [isModsLoading, setIsModsLoading] = createSignal(true);
   const [isRefreshing, setIsRefreshing] = createSignal(false);
   const [isRefreshingMods, setIsRefreshingMods] = createSignal(false);
-  const [expanded, setExpanded] = createSignal<ExpandedState>(true);
+  const [expanded, setExpanded] = createSignal<ExpandedState>({});
   const [categoryError, setCategoryError] = createSignal<string | null>(null);
   const [toastMessage, setToastMessage] = createSignal<string | null>(null);
 
@@ -229,6 +229,22 @@ function Main() {
 
   const columns: ColumnDef<TableRow>[] = [
     {
+      id: "expander",
+      header: "",
+      cell: (info) => (
+        <Show when={info.row.original.rowType === "mod"} fallback={<span class="inline-block w-4" />}>
+          <button
+            type="button"
+            class="inline-flex w-4 items-center justify-center text-zinc-600"
+            onClick={info.row.getToggleExpandedHandler()}
+            aria-label={info.row.getIsExpanded() ? "Collapse files" : "Expand files"}
+          >
+            {info.row.getIsExpanded() ? "▾" : "▸"}
+          </button>
+        </Show>
+      ),
+    },
+    {
       id: "enabled",
       header: "",
       cell: (info) => (
@@ -261,7 +277,7 @@ function Main() {
       id: "name",
       header: "Name",
       cell: (info) => (
-        <div class={info.row.original.rowType === "file" ? "pl-6 text-zinc-600" : ""}>
+        <div class={info.row.original.rowType === "file" ? "pl-2 text-zinc-600" : ""}>
           {info.row.original.name}
         </div>
       ),
