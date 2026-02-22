@@ -4,8 +4,11 @@ import {
   flexRender,
   getCoreRowModel,
   getExpandedRowModel,
+  getFilteredRowModel,
+  getSortedRowModel,
   type ColumnDef,
   type ExpandedState,
+  type SortingState,
 } from "@tanstack/solid-table";
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import Button from "../components/Button";
@@ -106,6 +109,8 @@ function Main() {
   const [isRefreshing, setIsRefreshing] = createSignal(false);
   const [isRefreshingMods, setIsRefreshingMods] = createSignal(false);
   const [expanded, setExpanded] = createSignal<ExpandedState>({});
+  const [sorting, setSorting] = createSignal<SortingState>([]);
+  const [globalFilter, setGlobalFilter] = createSignal("");
   const [selectedModIds, setSelectedModIds] = createSignal<Set<number>>(new Set());
   const [contextMenu, setContextMenu] = createSignal<{
     x: number;
@@ -299,6 +304,7 @@ function Main() {
     {
       id: "expander",
       header: "",
+      enableSorting: false,
       cell: (info) => (
         <Show when={info.row.original.rowType === "mod"} fallback={<span class="inline-block w-4" />}>
           <button
@@ -318,6 +324,7 @@ function Main() {
     {
       id: "enabled",
       header: "",
+      enableSorting: false,
       cell: (info) => (
         <Show
           when={info.row.original.rowType === "mod"}
@@ -347,6 +354,7 @@ function Main() {
     {
       id: "name",
       header: "Name",
+      accessorFn: (row) => row.name,
       cell: (info) => (
         <div class={info.row.original.rowType === "file" ? "pl-2 text-zinc-600" : ""}>
           {info.row.original.name}
@@ -356,21 +364,25 @@ function Main() {
     {
       id: "author",
       header: "Author",
+      accessorFn: (row) => row.author,
       cell: (info) => info.row.original.author,
     },
     {
       id: "category",
       header: "Category",
+      accessorFn: (row) => row.category,
       cell: (info) => info.row.original.category,
     },
     {
       id: "files",
       header: "Files",
+      accessorFn: (row) => row.uniqueFileCount,
       cell: (info) => (info.row.original.rowType === "mod" ? info.row.original.uniqueFileCount : ""),
     },
     {
       id: "last_modified",
       header: "Last Modified",
+      accessorFn: (row) => row.last_modified ?? 0,
       cell: (info) =>
         info.row.original.rowType === "mod" ? formatLastModified(info.row.original.last_modified) : "",
     },
@@ -387,9 +399,30 @@ function Main() {
       get expanded() {
         return expanded();
       },
+      get sorting() {
+        return sorting();
+      },
+      get globalFilter() {
+        return globalFilter();
+      },
     },
     onExpandedChange: setExpanded,
+    onSortingChange: setSorting,
+    onGlobalFilterChange: setGlobalFilter,
+    globalFilterFn: (row, _columnId, filterValue) => {
+      const query = String(filterValue).trim().toLowerCase();
+      if (!query) return true;
+      const item = row.original;
+      return (
+        item.name.toLowerCase().includes(query) ||
+        item.author.toLowerCase().includes(query) ||
+        item.category.toLowerCase().includes(query)
+      );
+    },
+    filterFromLeafRows: true,
     getExpandedRowModel: getExpandedRowModel(),
+    getFilteredRowModel: getFilteredRowModel(),
+    getSortedRowModel: getSortedRowModel(),
   });
 
   onMount(() => {
@@ -570,6 +603,15 @@ function Main() {
           content={
             <div class="space-y-3">
               <h2 class="text-lg font-semibold">Mods</h2>
+              <div>
+                <input
+                  type="text"
+                  placeholder="Filter mods..."
+                  value={globalFilter()}
+                  onInput={(event) => setGlobalFilter(event.currentTarget.value)}
+                  class="w-full rounded border border-zinc-300 px-3 py-2 text-sm text-zinc-900 md:max-w-sm"
+                />
+              </div>
               <Show when={isModsLoading()}>
                 <p class="text-sm text-zinc-500">Loading mods...</p>
               </Show>
@@ -585,9 +627,27 @@ function Main() {
                                 <th class="whitespace-nowrap border-b border-zinc-200 px-3 py-2 font-semibold text-zinc-700">
                                   {header.isPlaceholder
                                     ? null
-                                    : flexRender(
-                                        header.column.columnDef.header,
-                                        header.getContext(),
+                                    : (
+                                        <button
+                                          type="button"
+                                          class="inline-flex items-center gap-1"
+                                          onClick={header.column.getToggleSortingHandler()}
+                                          disabled={!header.column.getCanSort()}
+                                        >
+                                          {flexRender(
+                                            header.column.columnDef.header,
+                                            header.getContext(),
+                                          )}
+                                          <Show when={header.column.getCanSort()}>
+                                            <span class="text-xs text-zinc-500">
+                                              {header.column.getIsSorted() === "asc"
+                                                ? "▲"
+                                                : header.column.getIsSorted() === "desc"
+                                                  ? "▼"
+                                                  : ""}
+                                            </span>
+                                          </Show>
+                                        </button>
                                       )}
                                 </th>
                               )}
