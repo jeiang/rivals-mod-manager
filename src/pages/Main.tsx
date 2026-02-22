@@ -116,6 +116,10 @@ function Main() {
     modIds: number[];
     category: string;
   } | null>(null);
+  const [renameModal, setRenameModal] = createSignal<{
+    modId: number;
+    name: string;
+  } | null>(null);
   const [categoryError, setCategoryError] = createSignal<string | null>(null);
   const [toastMessage, setToastMessage] = createSignal<string | null>(null);
 
@@ -195,6 +199,24 @@ function Main() {
       showToast(err instanceof Error ? err.message : String(err));
     } finally {
       setCategoryModal(null);
+    }
+  };
+
+  const renameMod = async (modId: number, name: string) => {
+    const trimmed = name.trim();
+    if (!trimmed) {
+      showToast("Mod name cannot be empty");
+      return;
+    }
+
+    try {
+      await invoke("set_mod_name", { modId, name: trimmed });
+      setMods((current) =>
+        current.map((mod) => (mod.id === modId ? { ...mod, name: trimmed } : mod)),
+      );
+      setRenameModal(null);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err));
     }
   };
 
@@ -373,10 +395,12 @@ function Main() {
   onMount(() => {
     const closeMenu = () => setContextMenu(null);
     const closeModal = () => setCategoryModal(null);
+    const closeRenameModal = () => setRenameModal(null);
     const onKeydown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         closeMenu();
         closeModal();
+        closeRenameModal();
       }
     };
     window.addEventListener("click", closeMenu);
@@ -422,6 +446,17 @@ function Main() {
             >
               Set category
             </button>
+            <button
+              type="button"
+              class="block w-full px-3 py-1.5 text-left text-sm text-zinc-800 hover:bg-zinc-100"
+              onClick={() => {
+                const currentName = mods().find((mod) => mod.id === menu().modId)?.name ?? "";
+                setRenameModal({ modId: menu().modId, name: currentName });
+                setContextMenu(null);
+              }}
+            >
+              Rename mod
+            </button>
           </div>
         )}
       </Show>
@@ -457,6 +492,43 @@ function Main() {
                   Cancel
                 </Button>
                 <Button onClick={() => setModsCategory(modal().modIds, modal().category)}>Save</Button>
+              </div>
+            </div>
+          </div>
+        )}
+      </Show>
+      <Show when={renameModal()}>
+        {(modal) => (
+          <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
+            <div
+              class="w-full max-w-sm rounded border border-zinc-300 bg-white p-4 shadow-lg"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <h3 class="mb-3 text-base font-semibold text-zinc-900">Rename mod</h3>
+              <label class="mb-4 block">
+                <span class="mb-1 block text-sm font-medium text-zinc-700">Name</span>
+                <input
+                  type="text"
+                  class="w-full rounded border border-zinc-300 px-3 py-2 text-sm text-zinc-900"
+                  value={modal().name}
+                  onInput={(event) =>
+                    setRenameModal((current) =>
+                      current ? { ...current, name: event.currentTarget.value } : current,
+                    )
+                  }
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      void renameMod(modal().modId, modal().name);
+                    }
+                  }}
+                />
+              </label>
+              <div class="flex justify-end gap-2">
+                <Button class="bg-zinc-200 text-zinc-900 hover:bg-zinc-300" onClick={() => setRenameModal(null)}>
+                  Cancel
+                </Button>
+                <Button onClick={() => renameMod(modal().modId, modal().name)}>Save</Button>
               </div>
             </div>
           </div>

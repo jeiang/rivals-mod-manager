@@ -195,7 +195,6 @@ fn refresh_mods(state: State<'_, AppState>) -> Result<(), String> {
                 INSERT INTO mods (name, author, path, nexus_mod_id, category)
                 VALUES (?1, ?2, ?3, ?4, 'Uncategorized')
                 ON CONFLICT(path) DO UPDATE SET
-                    name = excluded.name,
                     author = excluded.author,
                     nexus_mod_id = excluded.nexus_mod_id
                 "#,
@@ -316,6 +315,24 @@ fn set_mods_category(state: State<'_, AppState>, mod_ids: Vec<i64>, category: St
         .map_err(|e| e.to_string())?;
     }
     tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn set_mod_name(state: State<'_, AppState>, mod_id: i64, name: String) -> Result<(), String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("Mod name cannot be empty".to_string());
+    }
+
+    let state = state.lock().map_err(|e| e.to_string())?;
+    state
+        .db
+        .execute(
+            "UPDATE mods SET name = ?2 WHERE id = ?1",
+            params![mod_id, trimmed],
+        )
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -709,6 +726,7 @@ pub fn run() {
                 set_mod_enabled,
                 set_mod_category,
                 set_mods_category,
+                set_mod_name,
                 refresh_categories
             ])
             .setup(|app| {
