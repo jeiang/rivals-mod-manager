@@ -104,6 +104,7 @@ function TriStateCheckbox(props: {
 function Main() {
   const [categories, setCategories] = createSignal<string[]>([]);
   const [mods, setMods] = createSignal<ModEntry[]>([]);
+  const [selectedCategory, setSelectedCategory] = createSignal<string>("All");
   const [isLoading, setIsLoading] = createSignal(true);
   const [isModsLoading, setIsModsLoading] = createSignal(true);
   const [isRefreshing, setIsRefreshing] = createSignal(false);
@@ -276,7 +277,9 @@ function Main() {
   };
 
   const modRows = createMemo<ModRow[]>(() =>
-    mods().map((mod) => ({
+    mods()
+      .filter((mod) => selectedCategory() === "All" || mod.category === selectedCategory())
+      .map((mod) => ({
       rowType: "mod",
       mod,
       id: `mod-${mod.id}`,
@@ -592,9 +595,29 @@ function Main() {
               </Show>
               <Show when={!isLoading() && !categoryError()}>
                 <ul class="space-y-1 text-sm">
-                  <li class="rounded px-2 py-1 hover:bg-zinc-100">All</li>
+                  <li>
+                    <button
+                      type="button"
+                      class="w-full rounded px-2 py-1 text-left hover:bg-zinc-100"
+                      classList={{ "bg-zinc-100 font-medium": selectedCategory() === "All" }}
+                      onClick={() => setSelectedCategory("All")}
+                    >
+                      All
+                    </button>
+                  </li>
                   <For each={categories()}>
-                    {(category) => <li class="rounded px-2 py-1 hover:bg-zinc-100">{category}</li>}
+                    {(category) => (
+                      <li>
+                        <button
+                          type="button"
+                          class="w-full rounded px-2 py-1 text-left hover:bg-zinc-100"
+                          classList={{ "bg-zinc-100 font-medium": selectedCategory() === category }}
+                          onClick={() => setSelectedCategory(category)}
+                        >
+                          {category}
+                        </button>
+                      </li>
+                    )}
                   </For>
                 </ul>
               </Show>
