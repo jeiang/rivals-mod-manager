@@ -7,7 +7,7 @@ import {
   type ColumnDef,
   type ExpandedState,
 } from "@tanstack/solid-table";
-import { For, Show, createEffect, createMemo, createSignal, onMount } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import Button from "../components/Button";
 import ResizableSidebar from "../components/ResizableSidebar";
 import TopNav from "../components/TopNav";
@@ -92,6 +92,7 @@ function TriStateCheckbox(props: {
       ref={ref}
       type="checkbox"
       checked={props.checked}
+      onClick={(event) => event.stopPropagation()}
       onChange={(event) => props.onChange(event.currentTarget.checked)}
     />
   );
@@ -105,6 +106,16 @@ function Main() {
   const [isRefreshing, setIsRefreshing] = createSignal(false);
   const [isRefreshingMods, setIsRefreshingMods] = createSignal(false);
   const [expanded, setExpanded] = createSignal<ExpandedState>({});
+  const [selectedModIds, setSelectedModIds] = createSignal<Set<number>>(new Set());
+  const [contextMenu, setContextMenu] = createSignal<{
+    x: number;
+    y: number;
+    modId: number;
+  } | null>(null);
+  const [categoryModal, setCategoryModal] = createSignal<{
+    modIds: number[];
+    category: string;
+  } | null>(null);
   const [categoryError, setCategoryError] = createSignal<string | null>(null);
   const [toastMessage, setToastMessage] = createSignal<string | null>(null);
 
@@ -171,6 +182,36 @@ function Main() {
     } finally {
       setIsRefreshingMods(false);
     }
+  };
+
+  const setModsCategory = async (modIds: number[], category: string) => {
+    try {
+      await invoke("set_mods_category", { modIds, category });
+      const selected = new Set(modIds);
+      setMods((current) =>
+        current.map((mod) => (selected.has(mod.id) ? { ...mod, category } : mod)),
+      );
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCategoryModal(null);
+    }
+  };
+
+  const selectModRow = (modId: number, isMultiSelect: boolean) => {
+    setSelectedModIds((current) => {
+      if (!isMultiSelect) {
+        return new Set([modId]);
+      }
+
+      const next = new Set(current);
+      if (next.has(modId)) {
+        next.delete(modId);
+      } else {
+        next.add(modId);
+      }
+      return next;
+    });
   };
 
   const setFileEnabled = async (fileId: number, isEnabled: boolean) => {
@@ -241,7 +282,10 @@ function Main() {
           <button
             type="button"
             class="inline-flex w-4 items-center justify-center text-zinc-600"
-            onClick={info.row.getToggleExpandedHandler()}
+            onClick={(event) => {
+              event.stopPropagation();
+              info.row.getToggleExpandedHandler()(event);
+            }}
             aria-label={info.row.getIsExpanded() ? "Collapse files" : "Expand files"}
           >
             {info.row.getIsExpanded() ? "▾" : "▸"}
@@ -326,12 +370,95 @@ function Main() {
     getExpandedRowModel: getExpandedRowModel(),
   });
 
+  onMount(() => {
+    const closeMenu = () => setContextMenu(null);
+    const closeModal = () => setCategoryModal(null);
+    const onKeydown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        closeMenu();
+        closeModal();
+      }
+    };
+    window.addEventListener("click", closeMenu);
+    window.addEventListener("scroll", closeMenu, true);
+    window.addEventListener("keydown", onKeydown);
+    onCleanup(() => {
+      window.removeEventListener("click", closeMenu);
+      window.removeEventListener("scroll", closeMenu, true);
+      window.removeEventListener("keydown", onKeydown);
+    });
+  });
+
   return (
     <div class="flex h-full min-h-0 flex-col">
       <Show when={toastMessage()}>
         {(message) => (
           <div class="fixed right-4 top-4 z-50 max-w-md rounded border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900 shadow">
             {message()}
+          </div>
+        )}
+      </Show>
+      <Show when={contextMenu()}>
+        {(menu) => (
+          <div
+            class="fixed z-50 min-w-48 rounded border border-zinc-300 bg-white py-1 shadow-lg"
+            style={{ left: `${menu().x}px`, top: `${menu().y}px` }}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <button
+              type="button"
+              class="block w-full px-3 py-1.5 text-left text-sm text-zinc-800 hover:bg-zinc-100"
+              onClick={() => {
+                const selected = selectedModIds();
+                const targetIds =
+                  selected.size > 1 && selected.has(menu().modId)
+                    ? Array.from(selected)
+                    : [menu().modId];
+                const currentCategory =
+                  mods().find((mod) => mod.id === targetIds[0])?.category ?? "Uncategorized";
+                setCategoryModal({ modIds: targetIds, category: currentCategory });
+                setContextMenu(null);
+              }}
+            >
+              Set category
+            </button>
+          </div>
+        )}
+      </Show>
+      <Show when={categoryModal()}>
+        {(modal) => (
+          <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
+            <div
+              class="w-full max-w-sm rounded border border-zinc-300 bg-white p-4 shadow-lg"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <h3 class="mb-3 text-base font-semibold text-zinc-900">Set mod category</h3>
+              <p class="mb-3 text-sm text-zinc-600">
+                Applying to {modal().modIds.length} mod{modal().modIds.length === 1 ? "" : "s"}
+              </p>
+              <label class="mb-4 block">
+                <span class="mb-1 block text-sm font-medium text-zinc-700">Category</span>
+                <select
+                  class="w-full rounded border border-zinc-300 px-3 py-2 text-sm text-zinc-900"
+                  value={modal().category}
+                  onChange={(event) =>
+                    setCategoryModal((current) =>
+                      current ? { ...current, category: event.currentTarget.value } : current,
+                    )
+                  }
+                >
+                  <For each={categories()}>
+                    {(category) => <option value={category}>{category}</option>}
+                  </For>
+                </select>
+              </label>
+              <div class="flex justify-end gap-2">
+                <Button class="bg-zinc-200 text-zinc-900 hover:bg-zinc-300" onClick={() => setCategoryModal(null)}>
+                  Cancel
+                </Button>
+                <Button onClick={() => setModsCategory(modal().modIds, modal().category)}>Save</Button>
+              </div>
+            </div>
           </div>
         )}
       </Show>
@@ -400,7 +527,31 @@ function Main() {
                     <tbody>
                       <For each={table.getRowModel().rows}>
                         {(row) => (
-                          <tr class="border-b border-zinc-100 last:border-b-0">
+                          <tr
+                            class="border-b border-zinc-100 last:border-b-0"
+                            classList={{
+                              "bg-zinc-100":
+                                row.original.rowType === "mod" &&
+                                selectedModIds().has(row.original.mod.id),
+                            }}
+                            onClick={(event) => {
+                              if (row.original.rowType !== "mod") return;
+                              const isMulti = event.ctrlKey || event.metaKey;
+                              selectModRow(row.original.mod.id, isMulti);
+                            }}
+                            onContextMenu={(event) => {
+                              if (row.original.rowType !== "mod") return;
+                              event.preventDefault();
+                              if (!selectedModIds().has(row.original.mod.id)) {
+                                setSelectedModIds(new Set([row.original.mod.id]));
+                              }
+                              setContextMenu({
+                                x: event.clientX,
+                                y: event.clientY,
+                                modId: row.original.mod.id,
+                              });
+                            }}
+                          >
                             <For each={row.getVisibleCells()}>
                               {(cell) => (
                                 <td class="whitespace-nowrap px-3 py-2 align-top text-zinc-800">

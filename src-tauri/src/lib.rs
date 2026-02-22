@@ -291,6 +291,34 @@ fn set_mod_enabled(state: State<'_, AppState>, mod_id: i64, is_enabled: bool) ->
     Ok(())
 }
 
+#[tauri::command]
+fn set_mod_category(state: State<'_, AppState>, mod_id: i64, category: String) -> Result<(), String> {
+    let state = state.lock().map_err(|e| e.to_string())?;
+    state
+        .db
+        .execute(
+            "UPDATE mods SET category = ?2 WHERE id = ?1",
+            params![mod_id, category],
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn set_mods_category(state: State<'_, AppState>, mod_ids: Vec<i64>, category: String) -> Result<(), String> {
+    let state = state.lock().map_err(|e| e.to_string())?;
+    let tx = state.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    for mod_id in mod_ids {
+        tx.execute(
+            "UPDATE mods SET category = ?2 WHERE id = ?1",
+            params![mod_id, category],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn query_setting(conn: &Connection, name: &str) -> rusqlite::Result<Option<String>> {
     conn.query_row(
         "SELECT value FROM settings WHERE name = ?1 LIMIT 1",
@@ -679,6 +707,8 @@ pub fn run() {
                 refresh_mods,
                 set_mod_file_enabled,
                 set_mod_enabled,
+                set_mod_category,
+                set_mods_category,
                 refresh_categories
             ])
             .setup(|app| {
