@@ -189,19 +189,35 @@ fn refresh_mods(state: State<'_, AppState>) -> Result<(), String> {
 
     let tx = state.db.unchecked_transaction().map_err(|e| e.to_string())?;
     {
-        let mut upsert = tx
+        let mut find_existing_mod = tx
+            .prepare(
+                r#"
+                SELECT id
+                FROM mods
+                WHERE
+                    (?1 IS NOT NULL AND nexus_mod_id = ?1)
+                    OR path = ?2
+                ORDER BY CASE WHEN (?1 IS NOT NULL AND nexus_mod_id = ?1) THEN 0 ELSE 1 END
+                LIMIT 1
+                "#,
+            )
+            .map_err(|e| e.to_string())?;
+        let mut insert_mod = tx
             .prepare(
                 r#"
                 INSERT INTO mods (name, author, path, nexus_mod_id, category)
                 VALUES (?1, ?2, ?3, ?4, 'Uncategorized')
-                ON CONFLICT(path) DO UPDATE SET
-                    author = excluded.author,
-                    nexus_mod_id = excluded.nexus_mod_id
                 "#,
             )
             .map_err(|e| e.to_string())?;
-        let mut select_mod_id = tx
-            .prepare("SELECT id FROM mods WHERE path = ?1 LIMIT 1")
+        let mut update_mod = tx
+            .prepare(
+                r#"
+                UPDATE mods
+                SET author = ?2, path = ?3, nexus_mod_id = ?4
+                WHERE id = ?1
+                "#,
+            )
             .map_err(|e| e.to_string())?;
         let mut upsert_file = tx
             .prepare(
@@ -216,17 +232,39 @@ fn refresh_mods(state: State<'_, AppState>) -> Result<(), String> {
         let mut delete_all_files = tx
             .prepare("DELETE FROM mod_files WHERE mod_id = ?1")
             .map_err(|e| e.to_string())?;
+        let mut seen_mod_ids = Vec::new();
 
         for discovered_mod in discovered {
             let metadata = parse_mod_metadata(&discovered_mod.name);
-            let path = discovered_mod.path;
-            upsert
-                .execute(params![metadata.name, metadata.author, path, metadata.nexus_mod_id])
+            let path = discovered_mod.path.clone();
+
+            let existing_mod_id = find_existing_mod
+                .query_row(params![metadata.nexus_mod_id, path], |row| row.get::<_, i64>(0))
+                .optional()
                 .map_err(|e| e.to_string())?;
 
-            let mod_id: i64 = select_mod_id
-                .query_row([path], |row| row.get(0))
-                .map_err(|e| e.to_string())?;
+            let mod_id = if let Some(existing_id) = existing_mod_id {
+                update_mod
+                    .execute(params![
+                        existing_id,
+                        metadata.author,
+                        discovered_mod.path,
+                        metadata.nexus_mod_id
+                    ])
+                    .map_err(|e| e.to_string())?;
+                existing_id
+            } else {
+                insert_mod
+                    .execute(params![
+                        metadata.name,
+                        metadata.author,
+                        discovered_mod.path,
+                        metadata.nexus_mod_id
+                    ])
+                    .map_err(|e| e.to_string())?;
+                tx.last_insert_rowid()
+            };
+            seen_mod_ids.push(mod_id);
 
             if discovered_mod.files.is_empty() {
                 delete_all_files
@@ -256,6 +294,18 @@ fn refresh_mods(state: State<'_, AppState>) -> Result<(), String> {
             }
             delete_stmt
                 .execute(rusqlite::params_from_iter(values))
+                .map_err(|e| e.to_string())?;
+        }
+
+        if seen_mod_ids.is_empty() {
+            tx.execute("DELETE FROM mods", []).map_err(|e| e.to_string())?;
+        } else {
+            let placeholders = (1..=seen_mod_ids.len())
+                .map(|idx| format!("?{idx}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let delete_missing_sql = format!("DELETE FROM mods WHERE id NOT IN ({placeholders})");
+            tx.execute(&delete_missing_sql, rusqlite::params_from_iter(seen_mod_ids))
                 .map_err(|e| e.to_string())?;
         }
     }
