@@ -14,6 +14,8 @@ use tauri::{Manager, State};
 type AppState = Mutex<AppData>;
 
 const HEROES_API_URL: &str = "https://marvelrivalsapi.com/api/v2/heroes";
+const NEXUS_API_BASE_URL: &str = "https://api.nexusmods.com/v1";
+const NEXUS_GAME_DOMAIN_NAME: &str = "marvelrivals";
 
 fn default_input_mods_folder() -> String {
     std::env::current_dir()
@@ -32,6 +34,7 @@ struct ModEntry {
     id: i64,
     name: String,
     author: String,
+    nexus_mod_id: Option<i64>,
     path: String,
     category: String,
     files: Vec<ModFileEntry>,
@@ -120,7 +123,7 @@ fn get_mods(state: State<'_, AppState>) -> Result<Vec<ModEntry>, String> {
         let mods_folder = resolve_mods_folder(&state.db).map_err(|e| e.to_string())?;
         let mut stmt = state
             .db
-            .prepare("SELECT id, name, author, path, category FROM mods ORDER BY name ASC")
+            .prepare("SELECT id, name, author, nexus_mod_id, path, category FROM mods ORDER BY name ASC")
             .map_err(|e| e.to_string())?;
 
         let rows = stmt
@@ -129,8 +132,9 @@ fn get_mods(state: State<'_, AppState>) -> Result<Vec<ModEntry>, String> {
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<i64>>(3)?,
                     row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
                 ))
             })
             .map_err(|e| e.to_string())?;
@@ -151,7 +155,7 @@ fn get_mods(state: State<'_, AppState>) -> Result<Vec<ModEntry>, String> {
         )
         .map_err(|e| e.to_string())?;
 
-    for (id, name, author, path, category) in db_rows {
+    for (id, name, author, nexus_mod_id, path, category) in db_rows {
         let file_rows = files_stmt
             .query_map([id], |row| {
                 Ok(ModFileEntry {
@@ -171,6 +175,7 @@ fn get_mods(state: State<'_, AppState>) -> Result<Vec<ModEntry>, String> {
             id,
             name,
             author,
+            nexus_mod_id,
             files,
             path: make_relative_to_mods_folder(&path, &mods_folder),
             category,
@@ -182,11 +187,45 @@ fn get_mods(state: State<'_, AppState>) -> Result<Vec<ModEntry>, String> {
 }
 
 #[tauri::command]
-fn refresh_mods(state: State<'_, AppState>) -> Result<(), String> {
-    let state = state.lock().map_err(|e| e.to_string())?;
-    let mods_folder = resolve_mods_folder(&state.db).map_err(|e| e.to_string())?;
+async fn refresh_mods(state: State<'_, AppState>) -> Result<(), String> {
+    let (mods_folder, nexus_token) = {
+        let state = state.lock().map_err(|e| e.to_string())?;
+        let mods_folder = resolve_mods_folder(&state.db).map_err(|e| e.to_string())?;
+        let nexus_token = query_setting(&state.db, "tokens.nexusmods")
+            .map_err(|e| e.to_string())?
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        (mods_folder, nexus_token)
+    };
     let discovered = discover_mods(&mods_folder)?;
 
+    let client = reqwest::Client::new();
+    let mut candidates = Vec::with_capacity(discovered.len());
+    for discovered_mod in discovered {
+        let metadata = parse_mod_metadata(&discovered_mod.name);
+        let mut name = metadata.name;
+        let mut author = metadata.author;
+
+        if let (Some(token), Some(mod_id)) = (nexus_token.as_deref(), metadata.nexus_mod_id) {
+            if mod_id > 0 {
+                if let Ok(Some((api_name, api_author))) =
+                    fetch_nexus_mod_details(&client, token, mod_id).await
+                {
+                    name = api_name;
+                    author = api_author;
+                }
+            }
+        }
+
+        candidates.push(RefreshModCandidate {
+            discovered_mod,
+            name,
+            author,
+            nexus_mod_id: metadata.nexus_mod_id,
+        });
+    }
+
+    let state = state.lock().map_err(|e| e.to_string())?;
     let tx = state.db.unchecked_transaction().map_err(|e| e.to_string())?;
     {
         let mut find_existing_mod = tx
@@ -234,12 +273,11 @@ fn refresh_mods(state: State<'_, AppState>) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         let mut seen_mod_ids = Vec::new();
 
-        for discovered_mod in discovered {
-            let metadata = parse_mod_metadata(&discovered_mod.name);
-            let path = discovered_mod.path.clone();
+        for candidate in candidates {
+            let path = candidate.discovered_mod.path.clone();
 
             let existing_mod_id = find_existing_mod
-                .query_row(params![metadata.nexus_mod_id, path], |row| row.get::<_, i64>(0))
+                .query_row(params![candidate.nexus_mod_id, path], |row| row.get::<_, i64>(0))
                 .optional()
                 .map_err(|e| e.to_string())?;
 
@@ -247,39 +285,39 @@ fn refresh_mods(state: State<'_, AppState>) -> Result<(), String> {
                 update_mod
                     .execute(params![
                         existing_id,
-                        metadata.author,
-                        discovered_mod.path,
-                        metadata.nexus_mod_id
+                        candidate.author,
+                        candidate.discovered_mod.path,
+                        candidate.nexus_mod_id
                     ])
                     .map_err(|e| e.to_string())?;
                 existing_id
             } else {
                 insert_mod
                     .execute(params![
-                        metadata.name,
-                        metadata.author,
-                        discovered_mod.path,
-                        metadata.nexus_mod_id
+                        candidate.name,
+                        candidate.author,
+                        candidate.discovered_mod.path,
+                        candidate.nexus_mod_id
                     ])
                     .map_err(|e| e.to_string())?;
                 tx.last_insert_rowid()
             };
             seen_mod_ids.push(mod_id);
 
-            if discovered_mod.files.is_empty() {
+            if candidate.discovered_mod.files.is_empty() {
                 delete_all_files
                     .execute([mod_id])
                     .map_err(|e| e.to_string())?;
                 continue;
             }
 
-            for file in &discovered_mod.files {
+            for file in &candidate.discovered_mod.files {
                 upsert_file
                     .execute(params![mod_id, file.filename, file.has_signatures])
                     .map_err(|e| e.to_string())?;
             }
 
-            let placeholders = (1..=discovered_mod.files.len())
+            let placeholders = (1..=candidate.discovered_mod.files.len())
                 .map(|idx| format!("?{}", idx + 1))
                 .collect::<Vec<_>>()
                 .join(", ");
@@ -287,9 +325,9 @@ fn refresh_mods(state: State<'_, AppState>) -> Result<(), String> {
                 "DELETE FROM mod_files WHERE mod_id = ?1 AND filename NOT IN ({placeholders})"
             );
             let mut delete_stmt = tx.prepare(&delete_sql).map_err(|e| e.to_string())?;
-            let mut values = Vec::with_capacity(discovered_mod.files.len() + 1);
+            let mut values = Vec::with_capacity(candidate.discovered_mod.files.len() + 1);
             values.push(rusqlite::types::Value::Integer(mod_id));
-            for file in &discovered_mod.files {
+            for file in &candidate.discovered_mod.files {
                 values.push(rusqlite::types::Value::Text(file.filename.clone()));
             }
             delete_stmt
@@ -386,6 +424,67 @@ fn set_mod_name(state: State<'_, AppState>, mod_id: i64, name: String) -> Result
     Ok(())
 }
 
+#[tauri::command]
+fn set_mod_author(state: State<'_, AppState>, mod_id: i64, author: String) -> Result<(), String> {
+    let trimmed = author.trim();
+    if trimmed.is_empty() {
+        return Err("Author cannot be empty".to_string());
+    }
+
+    let state = state.lock().map_err(|e| e.to_string())?;
+    state
+        .db
+        .execute(
+            "UPDATE mods SET author = ?2 WHERE id = ?1",
+            params![mod_id, trimmed],
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn set_mods_author(state: State<'_, AppState>, mod_ids: Vec<i64>, author: String) -> Result<(), String> {
+    let trimmed = author.trim();
+    if trimmed.is_empty() {
+        return Err("Author cannot be empty".to_string());
+    }
+
+    let state = state.lock().map_err(|e| e.to_string())?;
+    let tx = state.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    for mod_id in mod_ids {
+        tx.execute(
+            "UPDATE mods SET author = ?2 WHERE id = ?1",
+            params![mod_id, trimmed],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn set_mod_nexus_id(
+    state: State<'_, AppState>,
+    mod_id: i64,
+    nexus_mod_id: Option<i64>,
+) -> Result<(), String> {
+    if let Some(value) = nexus_mod_id {
+        if value < 0 {
+            return Err("Mod ID cannot be negative".to_string());
+        }
+    }
+
+    let state = state.lock().map_err(|e| e.to_string())?;
+    state
+        .db
+        .execute(
+            "UPDATE mods SET nexus_mod_id = ?2 WHERE id = ?1",
+            params![mod_id, nexus_mod_id],
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn query_setting(conn: &Connection, name: &str) -> rusqlite::Result<Option<String>> {
     conn.query_row(
         "SELECT value FROM settings WHERE name = ?1 LIMIT 1",
@@ -420,6 +519,71 @@ struct ParsedModMetadata {
     name: String,
     author: String,
     nexus_mod_id: Option<i64>,
+}
+
+struct RefreshModCandidate {
+    discovered_mod: DiscoveredMod,
+    name: String,
+    author: String,
+    nexus_mod_id: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct NexusModApiResponse {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    author: String,
+    uploader: Option<NexusUploader>,
+}
+
+#[derive(Deserialize)]
+struct NexusUploader {
+    name: Option<String>,
+}
+
+async fn fetch_nexus_mod_details(
+    client: &reqwest::Client,
+    token: &str,
+    mod_id: i64,
+) -> Result<Option<(String, String)>, String> {
+    let url = format!(
+        "{}/games/{}/mods/{}.json",
+        NEXUS_API_BASE_URL, NEXUS_GAME_DOMAIN_NAME, mod_id
+    );
+    let response = client
+        .get(url)
+        .header("apikey", token)
+        .header("accept", "application/json")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !response.status().is_success() {
+        return Ok(None);
+    }
+
+    let body = response
+        .json::<NexusModApiResponse>()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let name = body.name.trim().to_string();
+    if name.is_empty() {
+        return Ok(None);
+    }
+
+    let author = if !body.author.trim().is_empty() {
+        body.author.trim().to_string()
+    } else {
+        body.uploader
+            .and_then(|uploader| uploader.name)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "Unknown".to_string())
+    };
+
+    Ok(Some((name, author)))
 }
 
 fn parse_mod_metadata(raw_name: &str) -> ParsedModMetadata {
@@ -777,6 +941,9 @@ pub fn run() {
                 set_mod_category,
                 set_mods_category,
                 set_mod_name,
+                set_mod_author,
+                set_mods_author,
+                set_mod_nexus_id,
                 refresh_categories
             ])
             .setup(|app| {

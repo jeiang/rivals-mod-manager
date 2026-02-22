@@ -26,6 +26,7 @@ type ModEntry = {
   id: number;
   name: string;
   author: string;
+  nexus_mod_id: number | null;
   path: string;
   category: string;
   files: ModFileEntry[];
@@ -38,6 +39,7 @@ type ModRow = {
   id: string;
   name: string;
   author: string;
+  nexusModId: number | null;
   category: string;
   uniqueFileCount: number;
   last_modified: number | null;
@@ -51,6 +53,7 @@ type FileRow = {
   id: string;
   name: string;
   author: string;
+  nexusModId: null;
   category: string;
   uniqueFileCount: number;
   last_modified: null;
@@ -113,6 +116,7 @@ function Main() {
   const [sorting, setSorting] = createSignal<SortingState>([]);
   const [globalFilter, setGlobalFilter] = createSignal("");
   const [selectedModIds, setSelectedModIds] = createSignal<Set<number>>(new Set());
+  const [lastSelectedModId, setLastSelectedModId] = createSignal<number | null>(null);
   const [contextMenu, setContextMenu] = createSignal<{
     x: number;
     y: number;
@@ -125,6 +129,14 @@ function Main() {
   const [renameModal, setRenameModal] = createSignal<{
     modId: number;
     name: string;
+  } | null>(null);
+  const [authorModal, setAuthorModal] = createSignal<{
+    modIds: number[];
+    author: string;
+  } | null>(null);
+  const [modIdModal, setModIdModal] = createSignal<{
+    modId: number;
+    nexusModId: string;
   } | null>(null);
   const [categoryError, setCategoryError] = createSignal<string | null>(null);
   const [toastMessage, setToastMessage] = createSignal<string | null>(null);
@@ -226,8 +238,74 @@ function Main() {
     }
   };
 
-  const selectModRow = (modId: number, isMultiSelect: boolean) => {
+  const setModsAuthor = async (modIds: number[], author: string) => {
+    const trimmed = author.trim();
+    if (!trimmed) {
+      showToast("Author cannot be empty");
+      return;
+    }
+
+    try {
+      await invoke("set_mods_author", { modIds, author: trimmed });
+      const selected = new Set(modIds);
+      setMods((current) =>
+        current.map((mod) => (selected.has(mod.id) ? { ...mod, author: trimmed } : mod)),
+      );
+      setAuthorModal(null);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const setModNexusId = async (modId: number, rawValue: string) => {
+    const trimmed = rawValue.trim();
+    let nexus_mod_id: number | null = null;
+    if (trimmed !== "") {
+      const parsed = Number(trimmed);
+      if (!Number.isInteger(parsed) || parsed < 0) {
+        showToast("Mod ID must be a non-negative whole number");
+        return;
+      }
+      nexus_mod_id = parsed;
+    }
+
+    try {
+      await invoke("set_mod_nexus_id", { modId, nexusModId: nexus_mod_id });
+      setMods((current) =>
+        current.map((mod) => (mod.id === modId ? { ...mod, nexus_mod_id } : mod)),
+      );
+      setModIdModal(null);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const selectModRow = (modId: number, isMultiSelect: boolean, isRangeSelect: boolean) => {
+    const orderedModIds = table
+      .getRowModel()
+      .rows
+      .filter((row) => row.original.rowType === "mod")
+      .map((row) => row.original.mod.id);
+
     setSelectedModIds((current) => {
+      if (isRangeSelect && lastSelectedModId() !== null) {
+        const anchorId = lastSelectedModId()!;
+        const startIndex = orderedModIds.indexOf(anchorId);
+        const endIndex = orderedModIds.indexOf(modId);
+
+        if (startIndex !== -1 && endIndex !== -1) {
+          const [from, to] =
+            startIndex <= endIndex ? [startIndex, endIndex] : [endIndex, startIndex];
+          const rangeIds = orderedModIds.slice(from, to + 1);
+          if (isMultiSelect) {
+            const next = new Set(current);
+            for (const id of rangeIds) next.add(id);
+            return next;
+          }
+          return new Set(rangeIds);
+        }
+      }
+
       if (!isMultiSelect) {
         return new Set([modId]);
       }
@@ -240,6 +318,7 @@ function Main() {
       }
       return next;
     });
+    setLastSelectedModId(modId);
   };
 
   const setFileEnabled = async (fileId: number, isEnabled: boolean) => {
@@ -285,6 +364,7 @@ function Main() {
       id: `mod-${mod.id}`,
       name: mod.name,
       author: mod.author,
+      nexusModId: mod.nexus_mod_id,
       category: mod.category,
       uniqueFileCount: getUniqueFileCount(mod.files),
       last_modified: mod.last_modified,
@@ -295,6 +375,7 @@ function Main() {
         id: `file-${file.id}`,
         name: file.filename,
         author: "",
+        nexusModId: null,
         category: file.has_signatures ? "Signed" : "Unsigned",
         uniqueFileCount: 1,
         last_modified: null,
@@ -371,6 +452,15 @@ function Main() {
       cell: (info) => info.row.original.author,
     },
     {
+      id: "mod_id",
+      header: "Mod ID",
+      accessorFn: (row) => row.nexusModId ?? 0,
+      cell: (info) =>
+        info.row.original.rowType === "mod" && info.row.original.nexusModId
+          ? info.row.original.nexusModId
+          : "",
+    },
+    {
       id: "category",
       header: "Category",
       accessorFn: (row) => row.category,
@@ -432,11 +522,15 @@ function Main() {
     const closeMenu = () => setContextMenu(null);
     const closeModal = () => setCategoryModal(null);
     const closeRenameModal = () => setRenameModal(null);
+    const closeAuthorModal = () => setAuthorModal(null);
+    const closeModIdModal = () => setModIdModal(null);
     const onKeydown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         closeMenu();
         closeModal();
         closeRenameModal();
+        closeAuthorModal();
+        closeModIdModal();
       }
     };
     window.addEventListener("click", closeMenu);
@@ -486,13 +580,52 @@ function Main() {
               type="button"
               class="block w-full px-3 py-1.5 text-left text-sm text-zinc-800 hover:bg-zinc-100"
               onClick={() => {
-                const currentName = mods().find((mod) => mod.id === menu().modId)?.name ?? "";
-                setRenameModal({ modId: menu().modId, name: currentName });
+                const selected = selectedModIds();
+                const targetIds =
+                  selected.size > 1 && selected.has(menu().modId)
+                    ? Array.from(selected)
+                    : [menu().modId];
+                const currentAuthor = mods().find((mod) => mod.id === targetIds[0])?.author ?? "";
+                setAuthorModal({ modIds: targetIds, author: currentAuthor });
                 setContextMenu(null);
               }}
             >
-              Rename mod
+              Set author
             </button>
+            <Show
+              when={
+                !(
+                  selectedModIds().size > 1 &&
+                  selectedModIds().has(menu().modId)
+                )
+              }
+            >
+              <button
+                type="button"
+                class="block w-full px-3 py-1.5 text-left text-sm text-zinc-800 hover:bg-zinc-100"
+                onClick={() => {
+                  const currentName = mods().find((mod) => mod.id === menu().modId)?.name ?? "";
+                  setRenameModal({ modId: menu().modId, name: currentName });
+                  setContextMenu(null);
+                }}
+              >
+                Rename mod
+              </button>
+              <button
+                type="button"
+                class="block w-full px-3 py-1.5 text-left text-sm text-zinc-800 hover:bg-zinc-100"
+                onClick={() => {
+                  const currentId = mods().find((mod) => mod.id === menu().modId)?.nexus_mod_id;
+                  setModIdModal({
+                    modId: menu().modId,
+                    nexusModId: currentId === null ? "" : String(currentId),
+                  });
+                  setContextMenu(null);
+                }}
+              >
+                Set mod id
+              </button>
+            </Show>
           </div>
         )}
       </Show>
@@ -565,6 +698,84 @@ function Main() {
                   Cancel
                 </Button>
                 <Button onClick={() => renameMod(modal().modId, modal().name)}>Save</Button>
+              </div>
+            </div>
+          </div>
+        )}
+      </Show>
+      <Show when={authorModal()}>
+        {(modal) => (
+          <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
+            <div
+              class="w-full max-w-sm rounded border border-zinc-300 bg-white p-4 shadow-lg"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <h3 class="mb-3 text-base font-semibold text-zinc-900">Set author</h3>
+              <p class="mb-3 text-sm text-zinc-600">
+                Applying to {modal().modIds.length} mod{modal().modIds.length === 1 ? "" : "s"}
+              </p>
+              <label class="mb-4 block">
+                <span class="mb-1 block text-sm font-medium text-zinc-700">Author</span>
+                <input
+                  type="text"
+                  class="w-full rounded border border-zinc-300 px-3 py-2 text-sm text-zinc-900"
+                  value={modal().author}
+                  onInput={(event) =>
+                    setAuthorModal((current) =>
+                      current ? { ...current, author: event.currentTarget.value } : current,
+                    )
+                  }
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      void setModsAuthor(modal().modIds, modal().author);
+                    }
+                  }}
+                />
+              </label>
+              <div class="flex justify-end gap-2">
+                <Button class="bg-zinc-200 text-zinc-900 hover:bg-zinc-300" onClick={() => setAuthorModal(null)}>
+                  Cancel
+                </Button>
+                <Button onClick={() => setModsAuthor(modal().modIds, modal().author)}>Save</Button>
+              </div>
+            </div>
+          </div>
+        )}
+      </Show>
+      <Show when={modIdModal()}>
+        {(modal) => (
+          <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
+            <div
+              class="w-full max-w-sm rounded border border-zinc-300 bg-white p-4 shadow-lg"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <h3 class="mb-3 text-base font-semibold text-zinc-900">Set mod id</h3>
+              <label class="mb-4 block">
+                <span class="mb-1 block text-sm font-medium text-zinc-700">Nexus Mod ID</span>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  class="w-full rounded border border-zinc-300 px-3 py-2 text-sm text-zinc-900"
+                  value={modal().nexusModId}
+                  onInput={(event) =>
+                    setModIdModal((current) =>
+                      current ? { ...current, nexusModId: event.currentTarget.value } : current,
+                    )
+                  }
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      void setModNexusId(modal().modId, modal().nexusModId);
+                    }
+                  }}
+                />
+              </label>
+              <div class="flex justify-end gap-2">
+                <Button class="bg-zinc-200 text-zinc-900 hover:bg-zinc-300" onClick={() => setModIdModal(null)}>
+                  Cancel
+                </Button>
+                <Button onClick={() => setModNexusId(modal().modId, modal().nexusModId)}>Save</Button>
               </div>
             </div>
           </div>
@@ -692,7 +903,8 @@ function Main() {
                             onClick={(event) => {
                               if (row.original.rowType !== "mod") return;
                               const isMulti = event.ctrlKey || event.metaKey;
-                              selectModRow(row.original.mod.id, isMulti);
+                              const isRange = event.shiftKey;
+                              selectModRow(row.original.mod.id, isMulti, isRange);
                             }}
                             onContextMenu={(event) => {
                               if (row.original.rowType !== "mod") return;
