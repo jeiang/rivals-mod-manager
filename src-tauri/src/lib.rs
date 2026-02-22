@@ -203,7 +203,7 @@ async fn refresh_mods(state: State<'_, AppState>) -> Result<(), String> {
         let state = state.lock().map_err(|e| e.to_string())?;
         let mut stmt = state
             .db
-            .prepare("SELECT id, path, nexus_mod_id, mod_id_changed FROM mods")
+            .prepare("SELECT id, path, nexus_mod_id, mod_id_changed, author FROM mods")
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |row| {
@@ -212,6 +212,7 @@ async fn refresh_mods(state: State<'_, AppState>) -> Result<(), String> {
                     row.get::<_, String>(1)?,
                     row.get::<_, Option<i64>>(2)?,
                     row.get::<_, bool>(3)?,
+                    row.get::<_, String>(4)?,
                 ))
             })
             .map_err(|e| e.to_string())?;
@@ -226,26 +227,40 @@ async fn refresh_mods(state: State<'_, AppState>) -> Result<(), String> {
     let mut candidates = Vec::with_capacity(discovered.len());
     for discovered_mod in discovered {
         let metadata = parse_mod_metadata(&discovered_mod.name);
+        let matching_existing = existing_mods
+            .iter()
+            .find(|(_, path, nexus_mod_id, _, _)| {
+                (metadata.nexus_mod_id.is_some() && *nexus_mod_id == metadata.nexus_mod_id)
+                    || *path == discovered_mod.path
+            });
+        let existing_nexus_mod_id = matching_existing.and_then(|(_, _, nexus_mod_id, _, _)| *nexus_mod_id);
+        let effective_nexus_mod_id = metadata.nexus_mod_id.or(existing_nexus_mod_id);
         let mut name = metadata.name;
         let mut author = metadata.author;
-        let matching_existing = existing_mods.iter().find(|(_, path, nexus_mod_id, _)| {
-            (metadata.nexus_mod_id.is_some() && *nexus_mod_id == metadata.nexus_mod_id)
-                || *path == discovered_mod.path
-        });
-        let should_fetch_nexus = metadata.nexus_mod_id.map(|mod_id| mod_id > 0).unwrap_or(false)
+        let should_fetch_nexus = effective_nexus_mod_id.map(|mod_id| mod_id > 0).unwrap_or(false)
             && matching_existing
-                .map(|(_, _, _, mod_id_changed)| *mod_id_changed)
+                .map(|(_, _, _, mod_id_changed, _)| *mod_id_changed)
                 .unwrap_or(true);
         let mut mod_id_changed = should_fetch_nexus;
 
         if should_fetch_nexus {
-            if let (Some(token), Some(mod_id)) = (nexus_token.as_deref(), metadata.nexus_mod_id) {
+            if let (Some(token), Some(mod_id)) = (nexus_token.as_deref(), effective_nexus_mod_id) {
                 if mod_id > 0 {
-                if let Ok(Some((api_name, api_author))) =
+                if let Ok(Some(api_details)) =
                     fetch_nexus_mod_details(&client, token, mod_id).await
                 {
-                    name = api_name;
-                    author = api_author;
+                    name = api_details.name;
+                    let existing_author = matching_existing.map(|(_, _, _, _, existing_author)| existing_author.trim());
+                    let uploader_matches_existing = api_details
+                        .uploader_name
+                        .as_deref()
+                        .zip(existing_author)
+                        .map(|(uploader, existing)| uploader.eq_ignore_ascii_case(existing))
+                        .unwrap_or(false);
+
+                    if !uploader_matches_existing {
+                        author = api_details.author;
+                    }
                 }
                     mod_id_changed = false;
                 }
@@ -256,7 +271,7 @@ async fn refresh_mods(state: State<'_, AppState>) -> Result<(), String> {
             discovered_mod,
             name,
             author,
-            nexus_mod_id: metadata.nexus_mod_id,
+            nexus_mod_id: effective_nexus_mod_id,
             mod_id_changed,
         });
     }
@@ -578,6 +593,12 @@ struct RefreshModCandidate {
     mod_id_changed: bool,
 }
 
+struct NexusResolvedDetails {
+    name: String,
+    author: String,
+    uploader_name: Option<String>,
+}
+
 #[derive(Deserialize)]
 struct NexusModApiResponse {
     #[serde(default)]
@@ -596,7 +617,7 @@ async fn fetch_nexus_mod_details(
     client: &reqwest::Client,
     token: &str,
     mod_id: i64,
-) -> Result<Option<(String, String)>, String> {
+) -> Result<Option<NexusResolvedDetails>, String> {
     let url = format!(
         "{}/games/{}/mods/{}.json",
         NEXUS_API_BASE_URL, NEXUS_GAME_DOMAIN_NAME, mod_id
@@ -627,13 +648,23 @@ async fn fetch_nexus_mod_details(
         body.author.trim().to_string()
     } else {
         body.uploader
-            .and_then(|uploader| uploader.name)
+            .as_ref()
+            .and_then(|uploader| uploader.name.as_deref())
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| "Unknown".to_string())
     };
+    let uploader_name = body
+        .uploader
+        .and_then(|uploader| uploader.name)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
 
-    Ok(Some((name, author)))
+    Ok(Some(NexusResolvedDetails {
+        name,
+        author,
+        uploader_name,
+    }))
 }
 
 fn parse_mod_metadata(raw_name: &str) -> ParsedModMetadata {
