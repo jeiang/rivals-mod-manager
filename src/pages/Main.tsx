@@ -62,6 +62,14 @@ type FileRow = {
 
 type TableRow = ModRow | FileRow;
 
+function isModRow(row: TableRow): row is ModRow {
+  return row.rowType === "mod";
+}
+
+function isFileRow(row: TableRow): row is FileRow {
+  return row.rowType === "file";
+}
+
 function getFileStem(filename: string): string {
   const dotIndex = filename.lastIndexOf(".");
   return dotIndex > 0 ? filename.slice(0, dotIndex) : filename;
@@ -86,7 +94,7 @@ function TriStateCheckbox(props: {
   indeterminate?: boolean;
   onChange: (checked: boolean) => void;
 }) {
-  let ref!: HTMLInputElement;
+  let ref: HTMLInputElement | undefined;
   createEffect(() => {
     if (ref) {
       ref.indeterminate = !!props.indeterminate;
@@ -95,7 +103,9 @@ function TriStateCheckbox(props: {
 
   return (
     <input
-      ref={ref}
+      ref={(element) => {
+        ref = element;
+      }}
       type="checkbox"
       checked={props.checked}
       onClick={(event) => event.stopPropagation()}
@@ -318,8 +328,9 @@ function Main() {
   const selectModRow = (modId: number, isMultiSelect: boolean, isRangeSelect: boolean) => {
     const orderedModIds = table
       .getRowModel()
-      .rows.filter((row) => row.original.rowType === "mod")
-      .map((row) => row.original.mod.id);
+      .rows.map((row) => row.original)
+      .filter(isModRow)
+      .map((row) => row.mod.id);
 
     setSelectedModIds((current) => {
       if (isRangeSelect && lastSelectedModId() !== null) {
@@ -432,54 +443,50 @@ function Main() {
       id: "expander",
       header: "",
       enableSorting: false,
-      cell: (info) => (
-        <Show
-          when={info.row.original.rowType === "mod"}
-          fallback={<span class="inline-block w-4" />}
-        >
+      cell: (info) =>
+        isModRow(info.row.original) ? (
           <button
             type="button"
             class="inline-flex w-4 items-center justify-center text-zinc-600"
             onClick={(event) => {
               event.stopPropagation();
-              info.row.getToggleExpandedHandler()(event);
+              info.row.toggleExpanded();
             }}
             aria-label={info.row.getIsExpanded() ? "Collapse files" : "Expand files"}
           >
             {info.row.getIsExpanded() ? "▾" : "▸"}
           </button>
-        </Show>
-      ),
+        ) : (
+          <span class="inline-block w-4" />
+        ),
     },
     {
       id: "enabled",
       header: "",
       enableSorting: false,
-      cell: (info) => (
-        <Show
-          when={info.row.original.rowType === "mod"}
-          fallback={
+      cell: (info) => {
+        const row = info.row.original;
+        if (isFileRow(row)) {
+          return (
             <TriStateCheckbox
-              checked={info.row.original.file.is_enabled}
-              onChange={(checked) => setFileEnabled(info.row.original.file.id, checked)}
+              checked={row.file.is_enabled}
+              onChange={(checked) => setFileEnabled(row.file.id, checked)}
             />
-          }
-        >
-          {() => {
-            const fileRows = info.row.original.subRows;
-            const enabledCount = fileRows.filter((fileRow) => fileRow.file.is_enabled).length;
-            const allEnabled = fileRows.length > 0 && enabledCount === fileRows.length;
-            const noneEnabled = enabledCount === 0;
-            return (
-              <TriStateCheckbox
-                checked={allEnabled}
-                indeterminate={!allEnabled && !noneEnabled}
-                onChange={(checked) => setModEnabled(info.row.original.mod.id, checked)}
-              />
-            );
-          }}
-        </Show>
-      ),
+          );
+        }
+
+        const fileRows = row.subRows;
+        const enabledCount = fileRows.filter((fileRow) => fileRow.file.is_enabled).length;
+        const allEnabled = fileRows.length > 0 && enabledCount === fileRows.length;
+        const noneEnabled = enabledCount === 0;
+        return (
+          <TriStateCheckbox
+            checked={allEnabled}
+            indeterminate={!allEnabled && !noneEnabled}
+            onChange={(checked) => setModEnabled(row.mod.id, checked)}
+          />
+        );
+      },
     },
     {
       id: "name",
@@ -945,7 +952,7 @@ function Main() {
               </Show>
               <Show when={!isModsLoading()}>
                 <div class="overflow-x-auto overflow-y-auto rounded border border-zinc-200 md:overflow-x-visible">
-                  <table class="w-full min-w-[760px] border-collapse text-left text-sm md:min-w-full">
+                  <table class="w-full min-w-190 border-collapse text-left text-sm md:min-w-full">
                     <thead class="bg-zinc-50">
                       <For each={table.getHeaderGroups()}>
                         {(headerGroup) => (
@@ -955,7 +962,8 @@ function Main() {
                                 <th
                                   class="border-b border-zinc-200 px-3 py-2 font-semibold text-zinc-700"
                                   classList={{
-                                    "w-full whitespace-normal break-words": header.column.id === "name",
+                                    "w-full whitespace-normal break-words":
+                                      header.column.id === "name",
                                     "whitespace-nowrap": header.column.id !== "name",
                                   }}
                                 >
