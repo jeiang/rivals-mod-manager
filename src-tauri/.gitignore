@@ -7,5 +7,3 @@
 /gen/schemas
 # generate this with bun run tauri icon
 /icons
-*.log
-*.db
