@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashSet},
     error::Error,
     fs,
     path::{Path, PathBuf},
@@ -33,8 +33,16 @@ struct ModEntry {
     name: String,
     path: String,
     category: String,
-    files: Vec<String>,
+    files: Vec<ModFileEntry>,
     last_modified: Option<i64>,
+}
+
+#[derive(Serialize)]
+struct ModFileEntry {
+    id: i64,
+    filename: String,
+    has_signatures: bool,
+    is_enabled: bool,
 }
 
 #[derive(Deserialize)]
@@ -133,11 +141,34 @@ fn get_mods(state: State<'_, AppState>) -> Result<Vec<ModEntry>, String> {
     };
 
     let mut mods = Vec::with_capacity(db_rows.len());
+    let state = state.lock().map_err(|e| e.to_string())?;
+    let mut files_stmt = state
+        .db
+        .prepare(
+            "SELECT id, filename, has_signatures, is_enabled FROM mod_files WHERE mod_id = ?1 ORDER BY filename ASC",
+        )
+        .map_err(|e| e.to_string())?;
+
     for (id, name, path, category) in db_rows {
+        let file_rows = files_stmt
+            .query_map([id], |row| {
+                Ok(ModFileEntry {
+                    id: row.get(0)?,
+                    filename: row.get(1)?,
+                    has_signatures: row.get(2)?,
+                    is_enabled: row.get(3)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        let mut files = Vec::new();
+        for file_row in file_rows {
+            files.push(file_row.map_err(|e| e.to_string())?);
+        }
+
         mods.push(ModEntry {
             id,
             name,
-            files: find_mod_files(&path),
+            files,
             path: make_relative_to_mods_folder(&path, &mods_folder),
             category,
             last_modified: find_latest_modified_unix(&path),
@@ -165,15 +196,93 @@ fn refresh_mods(state: State<'_, AppState>) -> Result<(), String> {
                 "#,
             )
             .map_err(|e| e.to_string())?;
+        let mut select_mod_id = tx
+            .prepare("SELECT id FROM mods WHERE path = ?1 LIMIT 1")
+            .map_err(|e| e.to_string())?;
+        let mut upsert_file = tx
+            .prepare(
+                r#"
+                INSERT INTO mod_files (mod_id, filename, has_signatures, is_enabled)
+                VALUES (?1, ?2, ?3, 1)
+                ON CONFLICT(mod_id, filename) DO UPDATE SET
+                    has_signatures = excluded.has_signatures
+                "#,
+            )
+            .map_err(|e| e.to_string())?;
+        let mut delete_all_files = tx
+            .prepare("DELETE FROM mod_files WHERE mod_id = ?1")
+            .map_err(|e| e.to_string())?;
 
-        for (name, path) in discovered {
+        for discovered_mod in discovered {
+            let name = discovered_mod.name;
+            let path = discovered_mod.path;
             upsert
                 .execute(params![name, path])
+                .map_err(|e| e.to_string())?;
+
+            let mod_id: i64 = select_mod_id
+                .query_row([path], |row| row.get(0))
+                .map_err(|e| e.to_string())?;
+
+            if discovered_mod.files.is_empty() {
+                delete_all_files
+                    .execute([mod_id])
+                    .map_err(|e| e.to_string())?;
+                continue;
+            }
+
+            for file in &discovered_mod.files {
+                upsert_file
+                    .execute(params![mod_id, file.filename, file.has_signatures])
+                    .map_err(|e| e.to_string())?;
+            }
+
+            let placeholders = (1..=discovered_mod.files.len())
+                .map(|idx| format!("?{}", idx + 1))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let delete_sql = format!(
+                "DELETE FROM mod_files WHERE mod_id = ?1 AND filename NOT IN ({placeholders})"
+            );
+            let mut delete_stmt = tx.prepare(&delete_sql).map_err(|e| e.to_string())?;
+            let mut values = Vec::with_capacity(discovered_mod.files.len() + 1);
+            values.push(rusqlite::types::Value::Integer(mod_id));
+            for file in &discovered_mod.files {
+                values.push(rusqlite::types::Value::Text(file.filename.clone()));
+            }
+            delete_stmt
+                .execute(rusqlite::params_from_iter(values))
                 .map_err(|e| e.to_string())?;
         }
     }
     tx.commit().map_err(|e| e.to_string())?;
 
+    Ok(())
+}
+
+#[tauri::command]
+fn set_mod_file_enabled(state: State<'_, AppState>, file_id: i64, is_enabled: bool) -> Result<(), String> {
+    let state = state.lock().map_err(|e| e.to_string())?;
+    state
+        .db
+        .execute(
+            "UPDATE mod_files SET is_enabled = ?2 WHERE id = ?1",
+            params![file_id, is_enabled],
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn set_mod_enabled(state: State<'_, AppState>, mod_id: i64, is_enabled: bool) -> Result<(), String> {
+    let state = state.lock().map_err(|e| e.to_string())?;
+    state
+        .db
+        .execute(
+            "UPDATE mod_files SET is_enabled = ?2 WHERE mod_id = ?1",
+            params![mod_id, is_enabled],
+        )
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -196,7 +305,18 @@ fn resolve_mods_folder(conn: &Connection) -> rusqlite::Result<String> {
         .unwrap_or_else(|| Ok(default_input_mods_folder()))
 }
 
-fn discover_mods(mods_folder: &str) -> Result<Vec<(String, String)>, String> {
+struct DiscoveredMod {
+    name: String,
+    path: String,
+    files: Vec<DiscoveredModFile>,
+}
+
+struct DiscoveredModFile {
+    filename: String,
+    has_signatures: bool,
+}
+
+fn discover_mods(mods_folder: &str) -> Result<Vec<DiscoveredMod>, String> {
     let root = Path::new(mods_folder);
     if !root.exists() {
         return Err(format!("Mods folder does not exist: {mods_folder}"));
@@ -216,14 +336,44 @@ fn discover_mods(mods_folder: &str) -> Result<Vec<(String, String)>, String> {
 
         if metadata.is_dir() {
             let name = entry.file_name().to_string_lossy().to_string();
-            mods.push((name, path.to_string_lossy().to_string()));
+            let signature_stems = find_signature_stems(&path);
+            let files = find_mod_files(&path)
+                .into_iter()
+                .filter_map(|file_path| {
+                    let file = PathBuf::from(file_path);
+                    file.strip_prefix(&path).ok().map(|relative| DiscoveredModFile {
+                        filename: relative.to_string_lossy().to_string(),
+                        has_signatures: file
+                            .file_stem()
+                            .and_then(|stem| stem.to_str())
+                            .map(|stem| signature_stems.contains(&stem.to_ascii_lowercase()))
+                            .unwrap_or(false),
+                    })
+                })
+                .collect::<Vec<_>>();
+            mods.push(DiscoveredMod {
+                name,
+                path: path.to_string_lossy().to_string(),
+                files,
+            });
         } else if metadata.is_file() && has_mod_extension(&path) {
             let name = path
                 .file_stem()
                 .and_then(|stem| stem.to_str())
                 .unwrap_or("Unnamed Mod")
                 .to_string();
-            mods.push((name, path.to_string_lossy().to_string()));
+            mods.push(DiscoveredMod {
+                name,
+                path: path.to_string_lossy().to_string(),
+                files: vec![DiscoveredModFile {
+                    filename: path
+                        .file_name()
+                        .and_then(|filename| filename.to_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    has_signatures: has_matching_signature_files(&path),
+                }],
+            });
         }
     }
 
@@ -263,11 +413,54 @@ fn make_relative_to_mods_folder(path: &str, mods_folder: &str) -> String {
         .unwrap_or_else(|| path.to_string())
 }
 
-fn find_mod_files(path: &str) -> Vec<String> {
+fn find_mod_files(path: &Path) -> Vec<String> {
     let mut files = Vec::new();
-    collect_mod_files(Path::new(path), &mut files);
+    collect_mod_files(path, &mut files);
     files.sort_unstable();
     files
+}
+
+fn has_matching_signature_files(file_path: &Path) -> bool {
+    let mut ucas = file_path.to_path_buf();
+    ucas.set_extension("ucas");
+
+    let mut utoc = file_path.to_path_buf();
+    utoc.set_extension("utoc");
+
+    ucas.exists() || utoc.exists()
+}
+
+fn find_signature_stems(path: &Path) -> HashSet<String> {
+    let mut stems = HashSet::new();
+    collect_signature_stems(path, &mut stems);
+    stems
+}
+
+fn collect_signature_stems(path: &Path, stems: &mut HashSet<String>) {
+    let Ok(metadata) = path.metadata() else {
+        return;
+    };
+
+    if metadata.is_file() {
+        if is_signature_extension(path) {
+            if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
+                stems.insert(stem.to_ascii_lowercase());
+            }
+        }
+        return;
+    }
+
+    if !metadata.is_dir() {
+        return;
+    }
+
+    let Ok(entries) = fs::read_dir(path) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        collect_signature_stems(&entry.path(), stems);
+    }
 }
 
 fn find_latest_modified_unix(path: &str) -> Option<i64> {
@@ -330,7 +523,17 @@ fn has_mod_extension(path: &Path) -> bool {
         .and_then(|ext| ext.to_str())
         .map(|ext| {
             let ext = ext.to_ascii_lowercase();
-            ext == "pak" || ext == "ucas" || ext == "utoc"
+            ext == "pak"
+        })
+        .unwrap_or(false)
+}
+
+fn is_signature_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| {
+            let ext = ext.to_ascii_lowercase();
+            ext == "ucas" || ext == "utoc"
         })
         .unwrap_or(false)
 }
@@ -424,6 +627,8 @@ pub fn run() {
                 set_setting,
                 get_mods,
                 refresh_mods,
+                set_mod_file_enabled,
+                set_mod_enabled,
                 refresh_categories
             ])
             .setup(|app| {
@@ -460,6 +665,15 @@ fn init_db(conn: &mut Connection) -> rusqlite::Result<()> {
             category TEXT NOT NULL,
             FOREIGN KEY (category) REFERENCES categories(category)
         );
+
+        CREATE TABLE IF NOT EXISTS mod_files (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mod_id INTEGER NOT NULL,
+            filename TEXT NOT NULL,
+            has_signatures INTEGER NOT NULL,
+            is_enabled INTEGER NOT NULL,
+            FOREIGN KEY (mod_id) REFERENCES mods(id) ON DELETE CASCADE
+        );
         "#,
     )?;
 
@@ -474,6 +688,11 @@ fn init_db(conn: &mut Connection) -> rusqlite::Result<()> {
 
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_mods_path_unique ON mods(path)", [])
         .map_err(|e| e)?;
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_mod_files_mod_filename_unique ON mod_files(mod_id, filename)",
+        [],
+    )
+    .map_err(|e| e)?;
 
     let default_groups = ["Uncategorized"];
 
