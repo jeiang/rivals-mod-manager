@@ -384,6 +384,15 @@ function Main() {
     })),
   );
 
+  const authorSuggestions = createMemo<string[]>(() => {
+    const unique = new Set<string>();
+    for (const mod of mods()) {
+      const author = mod.author.trim();
+      if (author) unique.add(author);
+    }
+    return Array.from(unique).sort((a, b) => a.localeCompare(b));
+  });
+
   const columns: ColumnDef<TableRow>[] = [
     {
       id: "expander",
@@ -718,6 +727,7 @@ function Main() {
                 <span class="mb-1 block text-sm font-medium text-zinc-700">Author</span>
                 <input
                   type="text"
+                  list="author-suggestions"
                   class="w-full rounded border border-zinc-300 px-3 py-2 text-sm text-zinc-900"
                   value={modal().author}
                   onInput={(event) =>
@@ -732,6 +742,11 @@ function Main() {
                     }
                   }}
                 />
+                <datalist id="author-suggestions">
+                  <For each={authorSuggestions()}>
+                    {(author) => <option value={author} />}
+                  </For>
+                </datalist>
               </label>
               <div class="flex justify-end gap-2">
                 <Button class="bg-zinc-200 text-zinc-900 hover:bg-zinc-300" onClick={() => setAuthorModal(null)}>
