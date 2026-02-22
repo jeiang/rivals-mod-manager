@@ -246,6 +246,15 @@ function Main() {
     }
   };
 
+  const resetModsCategoryToAuto = async (modIds: number[]) => {
+    try {
+      await invoke("reset_mods_category_to_auto", { modIds });
+      await loadMods();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err));
+    }
+  };
+
   const renameMod = async (modId: number, name: string) => {
     const trimmed = name.trim();
     if (!trimmed) {
@@ -610,6 +619,21 @@ function Main() {
               }}
             >
               Set category
+            </button>
+            <button
+              type="button"
+              class="block w-full px-3 py-1.5 text-left text-sm text-zinc-800 hover:bg-zinc-100"
+              onClick={() => {
+                const selected = selectedModIds();
+                const targetIds =
+                  selected.size > 1 && selected.has(menu().modId)
+                    ? Array.from(selected)
+                    : [menu().modId];
+                void resetModsCategoryToAuto(targetIds);
+                setContextMenu(null);
+              }}
+            >
+              Reset to auto-category
             </button>
             <button
               type="button"

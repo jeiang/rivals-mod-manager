@@ -1,13 +1,13 @@
 use std::{
-    collections::{BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     error::Error,
-    fs,
-    io,
+    fs, io,
     path::{Path, PathBuf},
     sync::Mutex,
     time::UNIX_EPOCH,
 };
 
+use regex::RegexBuilder;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
@@ -53,6 +53,36 @@ struct ModFileEntry {
 #[derive(Deserialize)]
 struct HeroApiEntry {
     name: String,
+    #[serde(default)]
+    real_name: String,
+}
+
+#[derive(Serialize)]
+struct CategoryMatcher {
+    id: i64,
+    pattern: String,
+    matcher_type: String,
+    case_sensitive: bool,
+}
+
+#[derive(Serialize)]
+struct CategoryWithMatchers {
+    category: String,
+    matchers: Vec<CategoryMatcher>,
+}
+
+#[derive(Serialize)]
+struct CategoryManagementData {
+    api_categories: Vec<CategoryWithMatchers>,
+    custom_categories: Vec<CategoryWithMatchers>,
+}
+
+#[derive(Deserialize)]
+struct CategoryMatcherInput {
+    pattern: String,
+    matcher_type: String,
+    #[serde(default)]
+    case_sensitive: Option<bool>,
 }
 
 fn format_category_name(raw: &str) -> String {
@@ -106,13 +136,90 @@ fn get_categories(state: State<'_, AppState>) -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
+fn get_category_management(state: State<'_, AppState>) -> Result<CategoryManagementData, String> {
+    let state = state.lock().map_err(|e| e.to_string())?;
+    load_category_management_data(&state.db).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn create_custom_category(state: State<'_, AppState>, category: String) -> Result<(), String> {
+    let category = category.trim();
+    if category.is_empty() {
+        return Err("Category cannot be empty".to_string());
+    }
+
+    let state = state.lock().map_err(|e| e.to_string())?;
+    state
+        .db
+        .execute(
+            "INSERT OR IGNORE INTO categories (category, is_api) VALUES (?1, 0)",
+            [category],
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn set_category_matchers(
+    state: State<'_, AppState>,
+    category: String,
+    matchers: Vec<CategoryMatcherInput>,
+) -> Result<(), String> {
+    let category = category.trim();
+    if category.is_empty() {
+        return Err("Category cannot be empty".to_string());
+    }
+
+    let state = state.lock().map_err(|e| e.to_string())?;
+    let tx = state
+        .db
+        .unchecked_transaction()
+        .map_err(|e| e.to_string())?;
+    tx.execute(
+        "DELETE FROM category_matchers WHERE category = ?1",
+        [category],
+    )
+    .map_err(|e| e.to_string())?;
+
+    {
+        let mut insert_matcher = tx
+            .prepare(
+                r#"
+                INSERT INTO category_matchers (category, pattern, matcher_type, case_sensitive)
+                VALUES (?1, ?2, ?3, ?4)
+                "#,
+            )
+            .map_err(|e| e.to_string())?;
+        for matcher in matchers {
+            let pattern = matcher.pattern.trim().to_string();
+            if pattern.is_empty() {
+                continue;
+            }
+            let matcher_type = normalize_matcher_type(&matcher.matcher_type)
+                .ok_or_else(|| format!("Invalid matcher type: {}", matcher.matcher_type))?;
+            let case_sensitive = matcher.case_sensitive.unwrap_or(false);
+            insert_matcher
+                .execute(params![category, pattern, matcher_type, case_sensitive])
+                .map_err(|e| e.to_string())?;
+        }
+    }
+
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
 fn get_setting(state: State<'_, AppState>, name: String) -> Result<Option<String>, String> {
     let state = state.lock().map_err(|e| e.to_string())?;
     query_setting(&state.db, &name).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn set_setting(state: State<'_, AppState>, name: String, value: Option<String>) -> Result<(), String> {
+fn set_setting(
+    state: State<'_, AppState>,
+    name: String,
+    value: Option<String>,
+) -> Result<(), String> {
     let state = state.lock().map_err(|e| e.to_string())?;
     write_setting(&state.db, &name, value.as_deref()).map_err(|e| e.to_string())
 }
@@ -124,7 +231,23 @@ fn get_mods(state: State<'_, AppState>) -> Result<Vec<ModEntry>, String> {
         let mods_folder = resolve_mods_folder(&state.db).map_err(|e| e.to_string())?;
         let mut stmt = state
             .db
-            .prepare("SELECT id, name, author, nexus_mod_id, path, category FROM mods ORDER BY name ASC")
+            .prepare(
+                r#"
+                SELECT
+                    id,
+                    name,
+                    author,
+                    nexus_mod_id,
+                    path,
+                    CASE
+                        WHEN category_is_manual = 1 THEN category
+                        WHEN auto_category IS NOT NULL THEN auto_category
+                        ELSE 'Uncategorized'
+                    END AS effective_category
+                FROM mods
+                ORDER BY name ASC
+                "#,
+            )
             .map_err(|e| e.to_string())?;
 
         let rows = stmt
@@ -204,7 +327,9 @@ async fn refresh_mods(state: State<'_, AppState>) -> Result<(), String> {
         let state = state.lock().map_err(|e| e.to_string())?;
         let mut stmt = state
             .db
-            .prepare("SELECT id, path, nexus_mod_id, mod_id_changed, author FROM mods")
+            .prepare(
+                "SELECT id, path, nexus_mod_id, mod_id_changed, author, category_is_manual FROM mods",
+            )
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |row| {
@@ -214,6 +339,7 @@ async fn refresh_mods(state: State<'_, AppState>) -> Result<(), String> {
                     row.get::<_, Option<i64>>(2)?,
                     row.get::<_, bool>(3)?,
                     row.get::<_, String>(4)?,
+                    row.get::<_, bool>(5)?,
                 ))
             })
             .map_err(|e| e.to_string())?;
@@ -223,6 +349,10 @@ async fn refresh_mods(state: State<'_, AppState>) -> Result<(), String> {
         }
         values
     };
+    let category_matchers = {
+        let state = state.lock().map_err(|e| e.to_string())?;
+        load_compiled_category_matchers(&state.db).map_err(|e| e.to_string())?
+    };
 
     let client = reqwest::Client::new();
     let mut candidates = Vec::with_capacity(discovered.len());
@@ -230,43 +360,56 @@ async fn refresh_mods(state: State<'_, AppState>) -> Result<(), String> {
         let metadata = parse_mod_metadata(&discovered_mod.name);
         let matching_existing = existing_mods
             .iter()
-            .find(|(_, path, nexus_mod_id, _, _)| {
+            .find(|(_, path, nexus_mod_id, _, _, _)| {
                 (metadata.nexus_mod_id.is_some() && *nexus_mod_id == metadata.nexus_mod_id)
                     || *path == discovered_mod.path
             });
-        let existing_nexus_mod_id = matching_existing.and_then(|(_, _, nexus_mod_id, _, _)| *nexus_mod_id);
+        let is_new = matching_existing.is_none();
+        let existing_nexus_mod_id =
+            matching_existing.and_then(|(_, _, nexus_mod_id, _, _, _)| *nexus_mod_id);
         let effective_nexus_mod_id = metadata.nexus_mod_id.or(existing_nexus_mod_id);
         let mut name = metadata.name;
         let mut author = metadata.author;
-        let should_fetch_nexus = effective_nexus_mod_id.map(|mod_id| mod_id > 0).unwrap_or(false)
+        let should_fetch_nexus = effective_nexus_mod_id
+            .map(|mod_id| mod_id > 0)
+            .unwrap_or(false)
             && matching_existing
-                .map(|(_, _, _, mod_id_changed, _)| *mod_id_changed)
+                .map(|(_, _, _, mod_id_changed, _, _)| *mod_id_changed)
                 .unwrap_or(true);
         let mut mod_id_changed = should_fetch_nexus;
 
         if should_fetch_nexus {
             if let (Some(token), Some(mod_id)) = (nexus_token.as_deref(), effective_nexus_mod_id) {
                 if mod_id > 0 {
-                if let Ok(Some(api_details)) =
-                    fetch_nexus_mod_details(&client, token, mod_id).await
-                {
-                    name = api_details.name;
-                    let existing_author = matching_existing.map(|(_, _, _, _, existing_author)| existing_author.trim());
-                    let uploader_matches_existing = api_details
-                        .uploader_name
-                        .as_deref()
-                        .zip(existing_author)
-                        .map(|(uploader, existing)| uploader.eq_ignore_ascii_case(existing))
-                        .unwrap_or(false);
+                    if let Ok(Some(api_details)) =
+                        fetch_nexus_mod_details(&client, token, mod_id).await
+                    {
+                        name = api_details.name;
+                        let existing_author = matching_existing
+                            .map(|(_, _, _, _, existing_author, _)| existing_author.trim());
+                        let uploader_matches_existing = api_details
+                            .uploader_name
+                            .as_deref()
+                            .zip(existing_author)
+                            .map(|(uploader, existing)| uploader.eq_ignore_ascii_case(existing))
+                            .unwrap_or(false);
 
-                    if !uploader_matches_existing {
-                        author = api_details.author;
+                        if !uploader_matches_existing {
+                            author = api_details.author;
+                        }
                     }
-                }
                     mod_id_changed = false;
                 }
             }
         }
+        let category_is_manual = matching_existing
+            .map(|(_, _, _, _, _, is_manual)| *is_manual)
+            .unwrap_or(false);
+        let auto_category = if !is_new || category_is_manual {
+            None
+        } else {
+            find_auto_category_for_mod(&name, &discovered_mod.path, &category_matchers)
+        };
 
         candidates.push(RefreshModCandidate {
             discovered_mod,
@@ -274,11 +417,16 @@ async fn refresh_mods(state: State<'_, AppState>) -> Result<(), String> {
             author,
             nexus_mod_id: effective_nexus_mod_id,
             mod_id_changed,
+            auto_category,
+            is_new,
         });
     }
 
     let state = state.lock().map_err(|e| e.to_string())?;
-    let tx = state.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let tx = state
+        .db
+        .unchecked_transaction()
+        .map_err(|e| e.to_string())?;
     {
         let mut find_existing_mod = tx
             .prepare(
@@ -296,8 +444,8 @@ async fn refresh_mods(state: State<'_, AppState>) -> Result<(), String> {
         let mut insert_mod = tx
             .prepare(
                 r#"
-                INSERT INTO mods (name, author, path, nexus_mod_id, mod_id_changed, category)
-                VALUES (?1, ?2, ?3, ?4, ?5, 'Uncategorized')
+                INSERT INTO mods (name, author, path, nexus_mod_id, mod_id_changed, category, auto_category, category_is_manual)
+                VALUES (?1, ?2, ?3, ?4, ?5, 'Uncategorized', ?6, 0)
                 "#,
             )
             .map_err(|e| e.to_string())?;
@@ -307,6 +455,15 @@ async fn refresh_mods(state: State<'_, AppState>) -> Result<(), String> {
                 UPDATE mods
                 SET author = ?2, path = ?3, nexus_mod_id = ?4, mod_id_changed = ?5
                 WHERE id = ?1
+                "#,
+            )
+            .map_err(|e| e.to_string())?;
+        let mut update_auto_category = tx
+            .prepare(
+                r#"
+                UPDATE mods
+                SET auto_category = ?2
+                WHERE id = ?1 AND category_is_manual = 0
                 "#,
             )
             .map_err(|e| e.to_string())?;
@@ -329,7 +486,9 @@ async fn refresh_mods(state: State<'_, AppState>) -> Result<(), String> {
             let path = candidate.discovered_mod.path.clone();
 
             let existing_mod_id = find_existing_mod
-                .query_row(params![candidate.nexus_mod_id, path], |row| row.get::<_, i64>(0))
+                .query_row(params![candidate.nexus_mod_id, path], |row| {
+                    row.get::<_, i64>(0)
+                })
                 .optional()
                 .map_err(|e| e.to_string())?;
 
@@ -351,11 +510,17 @@ async fn refresh_mods(state: State<'_, AppState>) -> Result<(), String> {
                         candidate.author,
                         candidate.discovered_mod.path,
                         candidate.nexus_mod_id,
-                        candidate.mod_id_changed
+                        candidate.mod_id_changed,
+                        candidate.auto_category
                     ])
                     .map_err(|e| e.to_string())?;
                 tx.last_insert_rowid()
             };
+            if candidate.is_new {
+                update_auto_category
+                    .execute(params![mod_id, candidate.auto_category])
+                    .map_err(|e| e.to_string())?;
+            }
             seen_mod_ids.push(mod_id);
 
             if candidate.discovered_mod.files.is_empty() {
@@ -390,15 +555,19 @@ async fn refresh_mods(state: State<'_, AppState>) -> Result<(), String> {
         }
 
         if seen_mod_ids.is_empty() {
-            tx.execute("DELETE FROM mods", []).map_err(|e| e.to_string())?;
+            tx.execute("DELETE FROM mods", [])
+                .map_err(|e| e.to_string())?;
         } else {
             let placeholders = (1..=seen_mod_ids.len())
                 .map(|idx| format!("?{idx}"))
                 .collect::<Vec<_>>()
                 .join(", ");
             let delete_missing_sql = format!("DELETE FROM mods WHERE id NOT IN ({placeholders})");
-            tx.execute(&delete_missing_sql, rusqlite::params_from_iter(seen_mod_ids))
-                .map_err(|e| e.to_string())?;
+            tx.execute(
+                &delete_missing_sql,
+                rusqlite::params_from_iter(seen_mod_ids),
+            )
+            .map_err(|e| e.to_string())?;
         }
     }
     tx.commit().map_err(|e| e.to_string())?;
@@ -407,7 +576,11 @@ async fn refresh_mods(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn set_mod_file_enabled(state: State<'_, AppState>, file_id: i64, is_enabled: bool) -> Result<(), String> {
+fn set_mod_file_enabled(
+    state: State<'_, AppState>,
+    file_id: i64,
+    is_enabled: bool,
+) -> Result<(), String> {
     let state = state.lock().map_err(|e| e.to_string())?;
     state
         .db
@@ -420,7 +593,11 @@ fn set_mod_file_enabled(state: State<'_, AppState>, file_id: i64, is_enabled: bo
 }
 
 #[tauri::command]
-fn set_mod_enabled(state: State<'_, AppState>, mod_id: i64, is_enabled: bool) -> Result<(), String> {
+fn set_mod_enabled(
+    state: State<'_, AppState>,
+    mod_id: i64,
+    is_enabled: bool,
+) -> Result<(), String> {
     let state = state.lock().map_err(|e| e.to_string())?;
     state
         .db
@@ -433,12 +610,16 @@ fn set_mod_enabled(state: State<'_, AppState>, mod_id: i64, is_enabled: bool) ->
 }
 
 #[tauri::command]
-fn set_mod_category(state: State<'_, AppState>, mod_id: i64, category: String) -> Result<(), String> {
+fn set_mod_category(
+    state: State<'_, AppState>,
+    mod_id: i64,
+    category: String,
+) -> Result<(), String> {
     let state = state.lock().map_err(|e| e.to_string())?;
     state
         .db
         .execute(
-            "UPDATE mods SET category = ?2 WHERE id = ?1",
+            "UPDATE mods SET category = ?2, category_is_manual = 1, auto_category = NULL WHERE id = ?1",
             params![mod_id, category],
         )
         .map_err(|e| e.to_string())?;
@@ -446,16 +627,63 @@ fn set_mod_category(state: State<'_, AppState>, mod_id: i64, category: String) -
 }
 
 #[tauri::command]
-fn set_mods_category(state: State<'_, AppState>, mod_ids: Vec<i64>, category: String) -> Result<(), String> {
+fn set_mods_category(
+    state: State<'_, AppState>,
+    mod_ids: Vec<i64>,
+    category: String,
+) -> Result<(), String> {
     let state = state.lock().map_err(|e| e.to_string())?;
-    let tx = state.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let tx = state
+        .db
+        .unchecked_transaction()
+        .map_err(|e| e.to_string())?;
     for mod_id in mod_ids {
         tx.execute(
-            "UPDATE mods SET category = ?2 WHERE id = ?1",
+            "UPDATE mods SET category = ?2, category_is_manual = 1, auto_category = NULL WHERE id = ?1",
             params![mod_id, category],
         )
         .map_err(|e| e.to_string())?;
     }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn reset_mods_category_to_auto(
+    state: State<'_, AppState>,
+    mod_ids: Vec<i64>,
+) -> Result<(), String> {
+    let state = state.lock().map_err(|e| e.to_string())?;
+    let matchers = load_compiled_category_matchers(&state.db).map_err(|e| e.to_string())?;
+    let tx = state
+        .db
+        .unchecked_transaction()
+        .map_err(|e| e.to_string())?;
+
+    {
+        let mut find_mod = tx
+            .prepare("SELECT name, path FROM mods WHERE id = ?1")
+            .map_err(|e| e.to_string())?;
+        let mut update_mod = tx
+            .prepare("UPDATE mods SET category_is_manual = 0, auto_category = ?2 WHERE id = ?1")
+            .map_err(|e| e.to_string())?;
+
+        for mod_id in mod_ids {
+            let row = find_mod
+                .query_row([mod_id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .optional()
+                .map_err(|e| e.to_string())?;
+            if let Some((name, path)) = row {
+                let auto_category = find_auto_category_for_mod(&name, &path, &matchers);
+                update_mod
+                    .execute(params![mod_id, auto_category])
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+    }
+
     tx.commit().map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -497,14 +725,21 @@ fn set_mod_author(state: State<'_, AppState>, mod_id: i64, author: String) -> Re
 }
 
 #[tauri::command]
-fn set_mods_author(state: State<'_, AppState>, mod_ids: Vec<i64>, author: String) -> Result<(), String> {
+fn set_mods_author(
+    state: State<'_, AppState>,
+    mod_ids: Vec<i64>,
+    author: String,
+) -> Result<(), String> {
     let trimmed = author.trim();
     if trimmed.is_empty() {
         return Err("Author cannot be empty".to_string());
     }
 
     let state = state.lock().map_err(|e| e.to_string())?;
-    let tx = state.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let tx = state
+        .db
+        .unchecked_transaction()
+        .map_err(|e| e.to_string())?;
     for mod_id in mod_ids {
         tx.execute(
             "UPDATE mods SET author = ?2 WHERE id = ?1",
@@ -687,7 +922,10 @@ fn resolve_source_file_path(mod_path: &Path, filename: &str) -> PathBuf {
 
     let filename_path = Path::new(filename);
     if filename_path.components().count() == 1 {
-        let current_name = mod_path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+        let current_name = mod_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
         if current_name == filename {
             return mod_path.to_path_buf();
         }
@@ -732,6 +970,20 @@ struct RefreshModCandidate {
     author: String,
     nexus_mod_id: Option<i64>,
     mod_id_changed: bool,
+    auto_category: Option<String>,
+    is_new: bool,
+}
+
+enum CompiledMatcher {
+    Basic {
+        category: String,
+        pattern: String,
+        case_sensitive: bool,
+    },
+    Regex {
+        category: String,
+        pattern: regex::Regex,
+    },
 }
 
 struct NexusResolvedDetails {
@@ -872,14 +1124,16 @@ fn discover_mods(mods_folder: &str) -> Result<Vec<DiscoveredMod>, String> {
                 .into_iter()
                 .filter_map(|file_path| {
                     let file = PathBuf::from(file_path);
-                    file.strip_prefix(&path).ok().map(|relative| DiscoveredModFile {
-                        filename: relative.to_string_lossy().to_string(),
-                        has_signatures: file
-                            .file_stem()
-                            .and_then(|stem| stem.to_str())
-                            .map(|stem| signature_stems.contains(&stem.to_ascii_lowercase()))
-                            .unwrap_or(false),
-                    })
+                    file.strip_prefix(&path)
+                        .ok()
+                        .map(|relative| DiscoveredModFile {
+                            filename: relative.to_string_lossy().to_string(),
+                            has_signatures: file
+                                .file_stem()
+                                .and_then(|stem| stem.to_str())
+                                .map(|stem| signature_stems.contains(&stem.to_ascii_lowercase()))
+                                .unwrap_or(false),
+                        })
                 })
                 .collect::<Vec<_>>();
             mods.push(DiscoveredMod {
@@ -925,6 +1179,168 @@ fn write_setting(conn: &Connection, name: &str, value: Option<&str>) -> rusqlite
     }
 
     Ok(())
+}
+
+fn normalize_matcher_type(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "string" => Some("string"),
+        "regex" => Some("regex"),
+        _ => None,
+    }
+}
+
+fn load_category_management_data(conn: &Connection) -> rusqlite::Result<CategoryManagementData> {
+    let mut categories_stmt =
+        conn.prepare("SELECT category, is_api FROM categories ORDER BY category ASC")?;
+    let category_rows = categories_stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?))
+    })?;
+
+    let mut categories = Vec::new();
+    for row in category_rows {
+        let (category, is_api) = row?;
+        categories.push((category, is_api));
+    }
+
+    let mut matcher_map: BTreeMap<String, Vec<CategoryMatcher>> = BTreeMap::new();
+    let mut matcher_stmt = conn.prepare(
+        r#"
+        SELECT id, category, pattern, matcher_type, case_sensitive
+        FROM category_matchers
+        ORDER BY category ASC, id ASC
+        "#,
+    )?;
+    let matcher_rows = matcher_stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, bool>(4)?,
+        ))
+    })?;
+    for row in matcher_rows {
+        let (id, category, pattern, matcher_type, case_sensitive) = row?;
+        matcher_map
+            .entry(category)
+            .or_default()
+            .push(CategoryMatcher {
+                id,
+                pattern,
+                matcher_type,
+                case_sensitive,
+            });
+    }
+
+    let mut api_categories = Vec::new();
+    let mut custom_categories = Vec::new();
+    for (category, is_api) in categories {
+        let entry = CategoryWithMatchers {
+            matchers: matcher_map.remove(&category).unwrap_or_default(),
+            category: category.clone(),
+        };
+        if is_api {
+            api_categories.push(entry);
+        } else {
+            custom_categories.push(entry);
+        }
+    }
+
+    Ok(CategoryManagementData {
+        api_categories,
+        custom_categories,
+    })
+}
+
+fn load_compiled_category_matchers(conn: &Connection) -> rusqlite::Result<Vec<CompiledMatcher>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT category, pattern, matcher_type, case_sensitive
+        FROM category_matchers
+        ORDER BY category ASC, id ASC
+        "#,
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, bool>(3)?,
+        ))
+    })?;
+
+    let mut matchers = Vec::new();
+    for row in rows {
+        let (category, pattern, matcher_type, case_sensitive) = row?;
+        if pattern.trim().is_empty() {
+            continue;
+        }
+
+        match normalize_matcher_type(&matcher_type) {
+            Some("regex") => {
+                let regex = RegexBuilder::new(pattern.trim())
+                    .case_insensitive(!case_sensitive)
+                    .build();
+                if let Ok(regex) = regex {
+                    matchers.push(CompiledMatcher::Regex {
+                        category,
+                        pattern: regex,
+                    });
+                }
+            }
+            _ => matchers.push(CompiledMatcher::Basic {
+                category,
+                pattern: pattern.trim().to_string(),
+                case_sensitive,
+            }),
+        }
+    }
+
+    Ok(matchers)
+}
+
+fn find_auto_category_for_mod(
+    name: &str,
+    path: &str,
+    matchers: &[CompiledMatcher],
+) -> Option<String> {
+    for matcher in matchers {
+        if matcher_matches_text(matcher, name) {
+            return Some(match matcher {
+                CompiledMatcher::Basic { category, .. } => category.clone(),
+                CompiledMatcher::Regex { category, .. } => category.clone(),
+            });
+        }
+    }
+
+    for matcher in matchers {
+        if matcher_matches_text(matcher, path) {
+            return Some(match matcher {
+                CompiledMatcher::Basic { category, .. } => category.clone(),
+                CompiledMatcher::Regex { category, .. } => category.clone(),
+            });
+        }
+    }
+
+    None
+}
+
+fn matcher_matches_text(matcher: &CompiledMatcher, text: &str) -> bool {
+    match matcher {
+        CompiledMatcher::Basic {
+            pattern,
+            case_sensitive,
+            ..
+        } => {
+            if *case_sensitive {
+                text.contains(pattern)
+            } else {
+                text.to_ascii_lowercase()
+                    .contains(&pattern.to_ascii_lowercase())
+            }
+        }
+        CompiledMatcher::Regex { pattern, .. } => pattern.is_match(text),
+    }
 }
 
 fn make_relative_to_mods_folder(path: &str, mods_folder: &str) -> String {
@@ -1093,14 +1509,20 @@ async fn refresh_categories(state: State<'_, AppState>) -> Result<Vec<String>, S
         .map_err(|e| e.to_string())?;
 
     let mut unique_names = BTreeSet::new();
+    let mut default_matchers: Vec<(String, String)> = Vec::new();
     for hero in heroes {
         let name = hero.name.trim();
         if !name.is_empty() {
-            unique_names.insert(format_category_name(name));
+            let category = format_category_name(name);
+            unique_names.insert(category.clone());
+            default_matchers.push((category.clone(), name.to_string()));
+            let real_name = hero.real_name.trim();
+            if !real_name.is_empty() {
+                default_matchers.push((category, real_name.to_string()));
+            }
         }
     }
-    unique_names.insert("Uncategorized".to_string());
-    let categories: Vec<String> = unique_names.iter().cloned().collect();
+    let api_categories: Vec<String> = unique_names.iter().cloned().collect();
 
     let state = state.lock().map_err(|e| e.to_string())?;
     let tx = state
@@ -1108,39 +1530,130 @@ async fn refresh_categories(state: State<'_, AppState>) -> Result<Vec<String>, S
         .unchecked_transaction()
         .map_err(|e| e.to_string())?;
     {
-        let placeholders = (1..=categories.len())
-            .map(|index| format!("?{index}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-
         tx.execute(
-            r#"INSERT OR IGNORE INTO categories (category) VALUES ('Uncategorized')"#,
+            r#"INSERT OR IGNORE INTO categories (category, is_api) VALUES ('Uncategorized', 0)"#,
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute(
+            "UPDATE categories SET is_api = 0 WHERE category = 'Uncategorized'",
             [],
         )
         .map_err(|e| e.to_string())?;
 
-        let remap_mods_sql = format!(
-            "UPDATE mods SET category = 'Uncategorized' WHERE category NOT IN ({placeholders})"
-        );
-        tx.execute(&remap_mods_sql, params_from_iter(categories.iter()))
+        let mut upsert_category = tx
+            .prepare(
+                r#"
+                INSERT INTO categories (category, is_api)
+                VALUES (?1, 1)
+                ON CONFLICT(category) DO UPDATE SET is_api = 1
+                "#,
+            )
             .map_err(|e| e.to_string())?;
-
-        let remove_old_sql =
-            format!("DELETE FROM categories WHERE category NOT IN ({placeholders})");
-        tx.execute(&remove_old_sql, params_from_iter(categories.iter()))
-            .map_err(|e| e.to_string())?;
-
-        let mut insert_category = tx
-            .prepare(r#"INSERT OR IGNORE INTO categories (category) VALUES (?1)"#)
-            .map_err(|e| e.to_string())?;
-        for category in &categories {
-            insert_category
+        for category in &api_categories {
+            upsert_category
                 .execute([category])
+                .map_err(|e| e.to_string())?;
+        }
+
+        let stale_api_categories = if api_categories.is_empty() {
+            let mut stmt = tx
+                .prepare("SELECT category FROM categories WHERE is_api = 1")
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|e| e.to_string())?;
+            let mut values = Vec::new();
+            for row in rows {
+                values.push(row.map_err(|e| e.to_string())?);
+            }
+            values
+        } else {
+            let placeholders = (1..=api_categories.len())
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "SELECT category FROM categories WHERE is_api = 1 AND category NOT IN ({placeholders})"
+            );
+            let mut stmt = tx.prepare(&sql).map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(params_from_iter(api_categories.iter()), |row| {
+                    row.get::<_, String>(0)
+                })
+                .map_err(|e| e.to_string())?;
+            let mut values = Vec::new();
+            for row in rows {
+                values.push(row.map_err(|e| e.to_string())?);
+            }
+            values
+        };
+
+        for category in stale_api_categories {
+            tx.execute(
+                "UPDATE mods SET auto_category = NULL WHERE auto_category = ?1",
+                [category.as_str()],
+            )
+            .map_err(|e| e.to_string())?;
+
+            let manual_count: i64 = tx
+                .query_row(
+                    "SELECT COUNT(1) FROM mods WHERE category_is_manual = 1 AND category = ?1",
+                    [category.as_str()],
+                    |row| row.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+
+            if manual_count > 0 {
+                tx.execute(
+                    "UPDATE categories SET is_api = 0 WHERE category = ?1",
+                    [category.as_str()],
+                )
+                .map_err(|e| e.to_string())?;
+            } else {
+                tx.execute(
+                    "DELETE FROM category_matchers WHERE category = ?1",
+                    [category.as_str()],
+                )
+                .map_err(|e| e.to_string())?;
+                tx.execute(
+                    "DELETE FROM categories WHERE category = ?1 AND is_api = 1",
+                    [category.as_str()],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+        }
+
+        let mut insert_default_matcher = tx
+            .prepare(
+                r#"
+                INSERT OR IGNORE INTO category_matchers (category, pattern, matcher_type, case_sensitive)
+                VALUES (?1, ?2, 'string', 0)
+                "#,
+            )
+            .map_err(|e| e.to_string())?;
+        for (category, pattern) in default_matchers {
+            if pattern.trim().is_empty() {
+                continue;
+            }
+            insert_default_matcher
+                .execute(params![category, pattern])
                 .map_err(|e| e.to_string())?;
         }
     }
     tx.commit().map_err(|e| e.to_string())?;
 
+    let mut stmt = state
+        .db
+        .prepare("SELECT category FROM categories ORDER BY category ASC")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+    let mut categories = Vec::new();
+    for row in rows {
+        categories.push(row.map_err(|e| e.to_string())?);
+    }
     Ok(categories)
 }
 
@@ -1154,6 +1667,9 @@ pub fn run() {
             .invoke_handler(tauri::generate_handler![
                 greet,
                 get_categories,
+                get_category_management,
+                create_custom_category,
+                set_category_matchers,
                 get_setting,
                 set_setting,
                 get_mods,
@@ -1162,6 +1678,7 @@ pub fn run() {
                 set_mod_enabled,
                 set_mod_category,
                 set_mods_category,
+                reset_mods_category_to_auto,
                 set_mod_name,
                 set_mod_author,
                 set_mods_author,
@@ -1187,7 +1704,17 @@ fn init_db(conn: &mut Connection) -> rusqlite::Result<()> {
 
         CREATE TABLE IF NOT EXISTS categories (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            category TEXT NOT NULL UNIQUE
+            category TEXT NOT NULL UNIQUE,
+            is_api INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS category_matchers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            category TEXT NOT NULL,
+            pattern TEXT NOT NULL,
+            matcher_type TEXT NOT NULL,
+            case_sensitive INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY (category) REFERENCES categories(category) ON DELETE CASCADE
         );
 
         CREATE TABLE IF NOT EXISTS settings (
@@ -1204,6 +1731,8 @@ fn init_db(conn: &mut Connection) -> rusqlite::Result<()> {
             nexus_mod_id INTEGER,
             mod_id_changed INTEGER NOT NULL DEFAULT 0,
             category TEXT NOT NULL,
+            auto_category TEXT,
+            category_is_manual INTEGER NOT NULL DEFAULT 0,
             FOREIGN KEY (category) REFERENCES categories(category)
         );
 
@@ -1248,11 +1777,54 @@ fn init_db(conn: &mut Connection) -> rusqlite::Result<()> {
             Err(err)
         }
     })?;
+    conn.execute(
+        "ALTER TABLE categories ADD COLUMN is_api INTEGER NOT NULL DEFAULT 0",
+        [],
+    )
+    .or_else(|err| {
+        if err.to_string().contains("duplicate column name") {
+            Ok(0)
+        } else {
+            Err(err)
+        }
+    })?;
+    conn.execute("ALTER TABLE mods ADD COLUMN auto_category TEXT", [])
+        .or_else(|err| {
+            if err.to_string().contains("duplicate column name") {
+                Ok(0)
+            } else {
+                Err(err)
+            }
+        })?;
+    conn.execute(
+        "ALTER TABLE mods ADD COLUMN category_is_manual INTEGER NOT NULL DEFAULT 0",
+        [],
+    )
+    .or_else(|err| {
+        if err.to_string().contains("duplicate column name") {
+            Ok(0)
+        } else {
+            Err(err)
+        }
+    })?;
 
-    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_mods_path_unique ON mods(path)", [])
-        .map_err(|e| e)?;
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_mods_path_unique ON mods(path)",
+        [],
+    )
+    .map_err(|e| e)?;
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_mod_files_mod_filename_unique ON mod_files(mod_id, filename)",
+        [],
+    )
+    .map_err(|e| e)?;
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_category_matchers_unique ON category_matchers(category, matcher_type, pattern, case_sensitive)",
+        [],
+    )
+    .map_err(|e| e)?;
+    conn.execute(
+        "UPDATE mods SET auto_category = NULL WHERE category_is_manual = 1",
         [],
     )
     .map_err(|e| e)?;
@@ -1262,10 +1834,14 @@ fn init_db(conn: &mut Connection) -> rusqlite::Result<()> {
     let tx = conn.transaction()?;
     {
         let mut insert_group =
-            tx.prepare(r#"INSERT OR IGNORE INTO categories (category) VALUES (?1)"#)?;
+            tx.prepare(r#"INSERT OR IGNORE INTO categories (category, is_api) VALUES (?1, 0)"#)?;
         for group in default_groups {
             insert_group.execute([group])?;
         }
+        tx.execute(
+            "UPDATE categories SET is_api = 0 WHERE category = 'Uncategorized'",
+            [],
+        )?;
 
         let path = default_input_mods_folder();
         tx.execute(

@@ -4,6 +4,7 @@ import "./index.css";
 import { Route, Router } from "@solidjs/router";
 import Main from "./pages/Main";
 import Settings from "./pages/Settings";
+import Categories from "./pages/Categories";
 
 render(
   () => (
@@ -11,6 +12,7 @@ render(
       <Router>
         <Route path="/" component={Main} />
         <Route path="/settings" component={Settings} />
+        <Route path="/categories" component={Categories} />
       </Router>
     </main>
   ),
