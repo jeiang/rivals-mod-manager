@@ -31,6 +31,7 @@ struct AppData {
 struct ModEntry {
     id: i64,
     name: String,
+    author: String,
     path: String,
     category: String,
     files: Vec<ModFileEntry>,
@@ -119,7 +120,7 @@ fn get_mods(state: State<'_, AppState>) -> Result<Vec<ModEntry>, String> {
         let mods_folder = resolve_mods_folder(&state.db).map_err(|e| e.to_string())?;
         let mut stmt = state
             .db
-            .prepare("SELECT id, name, path, category FROM mods ORDER BY name ASC")
+            .prepare("SELECT id, name, author, path, category FROM mods ORDER BY name ASC")
             .map_err(|e| e.to_string())?;
 
         let rows = stmt
@@ -129,6 +130,7 @@ fn get_mods(state: State<'_, AppState>) -> Result<Vec<ModEntry>, String> {
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
                 ))
             })
             .map_err(|e| e.to_string())?;
@@ -149,7 +151,7 @@ fn get_mods(state: State<'_, AppState>) -> Result<Vec<ModEntry>, String> {
         )
         .map_err(|e| e.to_string())?;
 
-    for (id, name, path, category) in db_rows {
+    for (id, name, author, path, category) in db_rows {
         let file_rows = files_stmt
             .query_map([id], |row| {
                 Ok(ModFileEntry {
@@ -168,6 +170,7 @@ fn get_mods(state: State<'_, AppState>) -> Result<Vec<ModEntry>, String> {
         mods.push(ModEntry {
             id,
             name,
+            author,
             files,
             path: make_relative_to_mods_folder(&path, &mods_folder),
             category,
@@ -189,10 +192,12 @@ fn refresh_mods(state: State<'_, AppState>) -> Result<(), String> {
         let mut upsert = tx
             .prepare(
                 r#"
-                INSERT INTO mods (name, path, category)
-                VALUES (?1, ?2, 'Uncategorized')
+                INSERT INTO mods (name, author, path, nexus_mod_id, category)
+                VALUES (?1, ?2, ?3, ?4, 'Uncategorized')
                 ON CONFLICT(path) DO UPDATE SET
-                    name = excluded.name
+                    name = excluded.name,
+                    author = excluded.author,
+                    nexus_mod_id = excluded.nexus_mod_id
                 "#,
             )
             .map_err(|e| e.to_string())?;
@@ -214,10 +219,10 @@ fn refresh_mods(state: State<'_, AppState>) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
 
         for discovered_mod in discovered {
-            let name = discovered_mod.name;
+            let metadata = parse_mod_metadata(&discovered_mod.name);
             let path = discovered_mod.path;
             upsert
-                .execute(params![name, path])
+                .execute(params![metadata.name, metadata.author, path, metadata.nexus_mod_id])
                 .map_err(|e| e.to_string())?;
 
             let mod_id: i64 = select_mod_id
@@ -314,6 +319,51 @@ struct DiscoveredMod {
 struct DiscoveredModFile {
     filename: String,
     has_signatures: bool,
+}
+
+struct ParsedModMetadata {
+    name: String,
+    author: String,
+    nexus_mod_id: Option<i64>,
+}
+
+fn parse_mod_metadata(raw_name: &str) -> ParsedModMetadata {
+    let parts = raw_name
+        .split(" - ")
+        .map(|part| part.trim())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+
+    if parts.len() < 2 {
+        return ParsedModMetadata {
+            name: raw_name.to_string(),
+            author: "Unknown".to_string(),
+            nexus_mod_id: None,
+        };
+    }
+
+    let author = if parts[0].is_empty() {
+        "Unknown".to_string()
+    } else {
+        parts[0].to_string()
+    };
+
+    if parts.len() >= 3 {
+        let maybe_id = parts.last().and_then(|value| value.parse::<i64>().ok());
+        if let Some(nexus_mod_id) = maybe_id {
+            return ParsedModMetadata {
+                name: parts[1..parts.len() - 1].join(" - "),
+                author,
+                nexus_mod_id: Some(nexus_mod_id),
+            };
+        }
+    }
+
+    ParsedModMetadata {
+        name: parts[1..].join(" - "),
+        author,
+        nexus_mod_id: None,
+    }
 }
 
 fn discover_mods(mods_folder: &str) -> Result<Vec<DiscoveredMod>, String> {
@@ -660,6 +710,7 @@ fn init_db(conn: &mut Connection) -> rusqlite::Result<()> {
         CREATE TABLE IF NOT EXISTS mods (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
+            author TEXT NOT NULL DEFAULT 'Unknown',
             path TEXT NOT NULL,
             nexus_mod_id INTEGER,
             category TEXT NOT NULL,
@@ -685,6 +736,17 @@ fn init_db(conn: &mut Connection) -> rusqlite::Result<()> {
                 Err(err)
             }
         })?;
+    conn.execute(
+        "ALTER TABLE mods ADD COLUMN author TEXT NOT NULL DEFAULT 'Unknown'",
+        [],
+    )
+    .or_else(|err| {
+        if err.to_string().contains("duplicate column name") {
+            Ok(0)
+        } else {
+            Err(err)
+        }
+    })?;
 
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_mods_path_unique ON mods(path)", [])
         .map_err(|e| e)?;

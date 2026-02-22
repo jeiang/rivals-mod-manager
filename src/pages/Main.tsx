@@ -22,6 +22,7 @@ type ModFileEntry = {
 type ModEntry = {
   id: number;
   name: string;
+  author: string;
   path: string;
   category: string;
   files: ModFileEntry[];
@@ -33,6 +34,7 @@ type ModRow = {
   mod: ModEntry;
   id: string;
   name: string;
+  author: string;
   category: string;
   uniqueFileCount: number;
   last_modified: number | null;
@@ -45,6 +47,7 @@ type FileRow = {
   file: ModFileEntry;
   id: string;
   name: string;
+  author: string;
   category: string;
   uniqueFileCount: number;
   last_modified: null;
@@ -210,6 +213,7 @@ function Main() {
       mod,
       id: `mod-${mod.id}`,
       name: mod.name,
+      author: mod.author,
       category: mod.category,
       uniqueFileCount: getUniqueFileCount(mod.files),
       last_modified: mod.last_modified,
@@ -219,6 +223,7 @@ function Main() {
         file,
         id: `file-${file.id}`,
         name: file.filename,
+        author: "",
         category: file.has_signatures ? "Signed" : "Unsigned",
         uniqueFileCount: 1,
         last_modified: null,
@@ -281,6 +286,11 @@ function Main() {
           {info.row.original.name}
         </div>
       ),
+    },
+    {
+      id: "author",
+      header: "Author",
+      cell: (info) => info.row.original.author,
     },
     {
       id: "category",
