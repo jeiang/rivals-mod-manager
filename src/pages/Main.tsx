@@ -900,6 +900,12 @@ function Main() {
                                 row.original.rowType === "mod" &&
                                 selectedModIds().has(row.original.mod.id),
                             }}
+                            onMouseDown={(event) => {
+                              if (row.original.rowType !== "mod") return;
+                              if (event.shiftKey) {
+                                event.preventDefault();
+                              }
+                            }}
                             onClick={(event) => {
                               if (row.original.rowType !== "mod") return;
                               const isMulti = event.ctrlKey || event.metaKey;

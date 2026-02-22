@@ -199,20 +199,55 @@ async fn refresh_mods(state: State<'_, AppState>) -> Result<(), String> {
     };
     let discovered = discover_mods(&mods_folder)?;
 
+    let existing_mods = {
+        let state = state.lock().map_err(|e| e.to_string())?;
+        let mut stmt = state
+            .db
+            .prepare("SELECT id, path, nexus_mod_id, mod_id_changed FROM mods")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, bool>(3)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        let mut values = Vec::new();
+        for row in rows {
+            values.push(row.map_err(|e| e.to_string())?);
+        }
+        values
+    };
+
     let client = reqwest::Client::new();
     let mut candidates = Vec::with_capacity(discovered.len());
     for discovered_mod in discovered {
         let metadata = parse_mod_metadata(&discovered_mod.name);
         let mut name = metadata.name;
         let mut author = metadata.author;
+        let matching_existing = existing_mods.iter().find(|(_, path, nexus_mod_id, _)| {
+            (metadata.nexus_mod_id.is_some() && *nexus_mod_id == metadata.nexus_mod_id)
+                || *path == discovered_mod.path
+        });
+        let should_fetch_nexus = metadata.nexus_mod_id.map(|mod_id| mod_id > 0).unwrap_or(false)
+            && matching_existing
+                .map(|(_, _, _, mod_id_changed)| *mod_id_changed)
+                .unwrap_or(true);
+        let mut mod_id_changed = should_fetch_nexus;
 
-        if let (Some(token), Some(mod_id)) = (nexus_token.as_deref(), metadata.nexus_mod_id) {
-            if mod_id > 0 {
+        if should_fetch_nexus {
+            if let (Some(token), Some(mod_id)) = (nexus_token.as_deref(), metadata.nexus_mod_id) {
+                if mod_id > 0 {
                 if let Ok(Some((api_name, api_author))) =
                     fetch_nexus_mod_details(&client, token, mod_id).await
                 {
                     name = api_name;
                     author = api_author;
+                }
+                    mod_id_changed = false;
                 }
             }
         }
@@ -222,6 +257,7 @@ async fn refresh_mods(state: State<'_, AppState>) -> Result<(), String> {
             name,
             author,
             nexus_mod_id: metadata.nexus_mod_id,
+            mod_id_changed,
         });
     }
 
@@ -244,8 +280,8 @@ async fn refresh_mods(state: State<'_, AppState>) -> Result<(), String> {
         let mut insert_mod = tx
             .prepare(
                 r#"
-                INSERT INTO mods (name, author, path, nexus_mod_id, category)
-                VALUES (?1, ?2, ?3, ?4, 'Uncategorized')
+                INSERT INTO mods (name, author, path, nexus_mod_id, mod_id_changed, category)
+                VALUES (?1, ?2, ?3, ?4, ?5, 'Uncategorized')
                 "#,
             )
             .map_err(|e| e.to_string())?;
@@ -253,7 +289,7 @@ async fn refresh_mods(state: State<'_, AppState>) -> Result<(), String> {
             .prepare(
                 r#"
                 UPDATE mods
-                SET author = ?2, path = ?3, nexus_mod_id = ?4
+                SET author = ?2, path = ?3, nexus_mod_id = ?4, mod_id_changed = ?5
                 WHERE id = ?1
                 "#,
             )
@@ -287,7 +323,8 @@ async fn refresh_mods(state: State<'_, AppState>) -> Result<(), String> {
                         existing_id,
                         candidate.author,
                         candidate.discovered_mod.path,
-                        candidate.nexus_mod_id
+                        candidate.nexus_mod_id,
+                        candidate.mod_id_changed
                     ])
                     .map_err(|e| e.to_string())?;
                 existing_id
@@ -297,7 +334,8 @@ async fn refresh_mods(state: State<'_, AppState>) -> Result<(), String> {
                         candidate.name,
                         candidate.author,
                         candidate.discovered_mod.path,
-                        candidate.nexus_mod_id
+                        candidate.nexus_mod_id,
+                        candidate.mod_id_changed
                     ])
                     .map_err(|e| e.to_string())?;
                 tx.last_insert_rowid()
@@ -475,11 +513,22 @@ fn set_mod_nexus_id(
     }
 
     let state = state.lock().map_err(|e| e.to_string())?;
+    let current_value = state
+        .db
+        .query_row(
+            "SELECT nexus_mod_id FROM mods WHERE id = ?1",
+            [mod_id],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .flatten();
+    let changed = current_value != nexus_mod_id;
     state
         .db
         .execute(
-            "UPDATE mods SET nexus_mod_id = ?2 WHERE id = ?1",
-            params![mod_id, nexus_mod_id],
+            "UPDATE mods SET nexus_mod_id = ?2, mod_id_changed = ?3 WHERE id = ?1",
+            params![mod_id, nexus_mod_id, changed],
         )
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -526,6 +575,7 @@ struct RefreshModCandidate {
     name: String,
     author: String,
     nexus_mod_id: Option<i64>,
+    mod_id_changed: bool,
 }
 
 #[derive(Deserialize)]
@@ -978,6 +1028,7 @@ fn init_db(conn: &mut Connection) -> rusqlite::Result<()> {
             author TEXT NOT NULL DEFAULT 'Unknown',
             path TEXT NOT NULL,
             nexus_mod_id INTEGER,
+            mod_id_changed INTEGER NOT NULL DEFAULT 0,
             category TEXT NOT NULL,
             FOREIGN KEY (category) REFERENCES categories(category)
         );
@@ -1001,6 +1052,17 @@ fn init_db(conn: &mut Connection) -> rusqlite::Result<()> {
                 Err(err)
             }
         })?;
+    conn.execute(
+        "ALTER TABLE mods ADD COLUMN mod_id_changed INTEGER NOT NULL DEFAULT 0",
+        [],
+    )
+    .or_else(|err| {
+        if err.to_string().contains("duplicate column name") {
+            Ok(0)
+        } else {
+            Err(err)
+        }
+    })?;
     conn.execute(
         "ALTER TABLE mods ADD COLUMN author TEXT NOT NULL DEFAULT 'Unknown'",
         [],
