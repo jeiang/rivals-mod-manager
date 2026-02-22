@@ -944,15 +944,21 @@ function Main() {
                 <p class="text-sm text-zinc-500">Loading mods...</p>
               </Show>
               <Show when={!isModsLoading()}>
-                <div class="overflow-x-auto overflow-y-auto rounded border border-zinc-200">
-                  <table class="w-max min-w-full border-collapse text-left text-sm">
+                <div class="overflow-x-auto overflow-y-auto rounded border border-zinc-200 md:overflow-x-visible">
+                  <table class="w-full min-w-[760px] border-collapse text-left text-sm md:min-w-full">
                     <thead class="bg-zinc-50">
                       <For each={table.getHeaderGroups()}>
                         {(headerGroup) => (
                           <tr>
                             <For each={headerGroup.headers}>
                               {(header) => (
-                                <th class="whitespace-nowrap border-b border-zinc-200 px-3 py-2 font-semibold text-zinc-700">
+                                <th
+                                  class="border-b border-zinc-200 px-3 py-2 font-semibold text-zinc-700"
+                                  classList={{
+                                    "w-full whitespace-normal break-words": header.column.id === "name",
+                                    "whitespace-nowrap": header.column.id !== "name",
+                                  }}
+                                >
                                   {header.isPlaceholder ? null : (
                                     <button
                                       type="button"
@@ -1019,7 +1025,13 @@ function Main() {
                           >
                             <For each={row.getVisibleCells()}>
                               {(cell) => (
-                                <td class="whitespace-nowrap px-3 py-2 align-top text-zinc-800">
+                                <td
+                                  class="px-3 py-2 align-top text-zinc-800"
+                                  classList={{
+                                    "whitespace-normal break-words": cell.column.id === "name",
+                                    "whitespace-nowrap": cell.column.id !== "name",
+                                  }}
+                                >
                                   {flexRender(cell.column.columnDef.cell, cell.getContext())}
                                 </td>
                               )}
