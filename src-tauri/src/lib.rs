@@ -1061,13 +1061,8 @@ async fn fetch_nexus_mod_details(
 }
 
 fn parse_mod_metadata(raw_name: &str) -> ParsedModMetadata {
-    let parts = raw_name
-        .split(" - ")
-        .map(|part| part.trim())
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>();
-
-    if parts.len() < 2 {
+    let trimmed = raw_name.trim();
+    if trimmed.is_empty() {
         return ParsedModMetadata {
             name: raw_name.to_string(),
             author: "Unknown".to_string(),
@@ -1075,27 +1070,78 @@ fn parse_mod_metadata(raw_name: &str) -> ParsedModMetadata {
         };
     }
 
-    let author = if parts[0].is_empty() {
-        "Unknown".to_string()
-    } else {
-        parts[0].to_string()
-    };
+    // 1) <mod name> - <mod id>
+    // Name may contain dashes. ID is always numeric, so split from the last dash.
+    if let Some((name_part, id_part)) = trimmed.rsplit_once('-') {
+        if let Ok(nexus_mod_id) = id_part.trim().parse::<i64>() {
+            let name = name_part.trim();
+            if !name.is_empty() {
+                return ParsedModMetadata {
+                    name: name.to_string(),
+                    author: "Unknown".to_string(),
+                    nexus_mod_id: Some(nexus_mod_id),
+                };
+            }
+        }
+    }
 
-    if parts.len() >= 3 {
-        let maybe_id = parts.last().and_then(|value| value.parse::<i64>().ok());
-        if let Some(nexus_mod_id) = maybe_id {
+    // 2) <mod creator> - <mod name>
+    // Creator never contains dashes, so split from the first dash.
+    if let Some((author_part, name_part)) = trimmed.split_once('-') {
+        let author = author_part.trim();
+        let name = name_part.trim();
+        if !author.is_empty() && !name.is_empty() {
             return ParsedModMetadata {
-                name: parts[1..parts.len() - 1].join(" - "),
-                author,
-                nexus_mod_id: Some(nexus_mod_id),
+                name: name.to_string(),
+                author: author.to_string(),
+                nexus_mod_id: None,
             };
         }
     }
 
     ParsedModMetadata {
-        name: parts[1..].join(" - "),
-        author,
+        name: raw_name.to_string(),
+        author: "Unknown".to_string(),
         nexus_mod_id: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_mod_metadata;
+
+    #[test]
+    fn parses_name_and_mod_id_format() {
+        let parsed = parse_mod_metadata("Invisible Woman First Steps - 1234");
+        assert_eq!(parsed.name, "Invisible Woman First Steps");
+        assert_eq!(parsed.author, "Unknown");
+        assert_eq!(parsed.nexus_mod_id, Some(1234));
+    }
+
+    #[test]
+    fn parses_creator_and_name_format() {
+        let parsed = parse_mod_metadata("JellyBX - Invisible Woman First Steps");
+        assert_eq!(parsed.name, "Invisible Woman First Steps");
+        assert_eq!(parsed.author, "JellyBX");
+        assert_eq!(parsed.nexus_mod_id, None);
+    }
+
+    #[test]
+    fn parses_name_and_id_with_dashes_in_name() {
+        let parsed =
+            parse_mod_metadata("Invisible Woman First Steps - Custom Remesh - 1234");
+        assert_eq!(parsed.name, "Invisible Woman First Steps - Custom Remesh");
+        assert_eq!(parsed.author, "Unknown");
+        assert_eq!(parsed.nexus_mod_id, Some(1234));
+    }
+
+    #[test]
+    fn parses_creator_and_name_with_dashes_in_name() {
+        let parsed =
+            parse_mod_metadata("JellyBX - Invisible Woman First Steps - Custom Remesh");
+        assert_eq!(parsed.name, "Invisible Woman First Steps - Custom Remesh");
+        assert_eq!(parsed.author, "JellyBX");
+        assert_eq!(parsed.nexus_mod_id, None);
     }
 }
 
