@@ -1,69 +1,150 @@
 {
-  description = "Tauri v2 devshell with latest Rust nightly";
+  description = "Build a cargo project";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+
+    crane.url = "github:ipetkov/crane";
+
     flake-utils.url = "github:numtide/flake-utils";
-    rust-overlay.url = "github:oxalica/rust-overlay";
+
+    advisory-db = {
+      url = "github:rustsec/advisory-db";
+      flake = false;
+    };
   };
 
-  outputs = { self, nixpkgs, flake-utils, rust-overlay }:
-    flake-utils.lib.eachDefaultSystem (system:
+  outputs =
+    {
+      self,
+      nixpkgs,
+      crane,
+      flake-utils,
+      advisory-db,
+      ...
+    }:
+    flake-utils.lib.eachDefaultSystem (
+      system:
       let
-        pkgs = import nixpkgs {
-          inherit system;
-          overlays = [ rust-overlay.overlays.default ];
+        pkgs = nixpkgs.legacyPackages.${system};
+
+        inherit (pkgs) lib;
+
+        craneLib = crane.mkLib pkgs;
+        src = let
+          eguiAssets = path: _type: builtins.match ".*\.png$" path != null;
+          filters = path: type:
+            (eguiAssets path type) || (craneLib.filterCargoSources path type);
+        in lib.cleanSourceWith {
+          src = ./.;
+          filter = filters;
+          name = "source"; # Be reproducible, regardless of the directory name
         };
 
-        rustNightly = pkgs.rust-bin.nightly.latest.default.override {
-          extensions = [ "rust-src" "rust-analyzer" ];
+        commonArgs = {
+          inherit src;
+          strictDeps = true;
+
+          buildInputs = with pkgs; [
+            trunk
+
+            # misc. libraries
+            openssl
+            pkg-config
+
+            # GUI libs
+            libxkbcommon
+            libGL
+            fontconfig
+
+            # wayland libraries
+            wayland
+
+            # x11 libraries
+            libxcursor
+            libxrandr
+            libxi
+            libx11
+          ];
+          LD_LIBRARY_PATH = "${lib.makeLibraryPath commonArgs.buildInputs}";
         };
 
-        isLinux = pkgs.stdenv.isLinux;
-        isDarwin = pkgs.stdenv.isDarwin;
+        # Build *just* the cargo dependencies, so we can reuse
+        # all of that work (e.g. via cachix) when running in CI
+        cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 
-        common = with pkgs; [
-          rustNightly
-          pkg-config
-          openssl
-          cacert
-          bun
-        ];
-
-        # Tauri v2 Linux deps: webkit2gtk 4.1 + gtk3 (+ tray libs if used)
-        tauriLinux = with pkgs; [
-          gtk3
-          webkitgtk_4_1
-          librsvg
-          glib
-          libsoup_3
-          glib-networking
-
-          # Only needed if you use the system tray:
-          libayatana-appindicator
-        ];
-
-        tauriDarwin = with pkgs; [
-          darwin.apple_sdk.frameworks.AppKit
-          darwin.apple_sdk.frameworks.WebKit
-          darwin.apple_sdk.frameworks.CoreServices
-          darwin.apple_sdk.frameworks.Security
-        ];
+        # Build the actual crate itself, reusing the dependency
+        # artifacts from above.
+        rivals-mod-manager = craneLib.buildPackage (
+          commonArgs
+          // {
+            inherit cargoArtifacts;
+            doCheck = false;
+          }
+        );
       in
       {
-        devShells.default = pkgs.mkShell {
-          packages =
-            common
-            ++ pkgs.lib.optionals isLinux tauriLinux
-            ++ pkgs.lib.optionals isDarwin tauriDarwin;
+        checks = {
+          inherit rivals-mod-manager;
 
-          OPENSSL_NO_VENDOR = 1;
+          rivals-mod-manager-clippy = craneLib.cargoClippy (
+            commonArgs
+            // {
+              inherit cargoArtifacts;
+              cargoClippyExtraArgs = "--all-targets -- --deny warnings";
+            }
+          );
 
-          shellHook = ''
-            export RUST_SRC_PATH="${rustNightly}/lib/rustlib/src/rust/library"
-            echo "rustc: $(rustc --version)"
-            echo "node:  $(bun --version)"
-          '';
+          # rivals-mod-manager-doc = craneLib.cargoDoc (
+          #   commonArgs
+          #   // {
+          #     inherit cargoArtifacts;
+          #     env.RUSTDOCFLAGS = "--deny warnings";
+          #   }
+          # );
+
+          # Check formatting
+          rivals-mod-manager-fmt = craneLib.cargoFmt {
+            inherit src;
+          };
+
+          rivals-mod-manager-toml-fmt = craneLib.taploFmt {
+            src = pkgs.lib.sources.sourceFilesBySuffices src [ ".toml" ];
+          };
+
+          # Audit dependencies
+          rivals-mod-manager-audit = craneLib.cargoAudit {
+            inherit src advisory-db;
+          };
+
+          rivals-mod-manager-nextest = craneLib.cargoNextest (
+            commonArgs
+            // {
+              inherit cargoArtifacts;
+              partitions = 1;
+              partitionType = "count";
+              cargoNextestPartitionsExtraArgs = "--no-tests=pass";
+            }
+          );
         };
-      });
+
+        packages = {
+          default = rivals-mod-manager;
+        };
+
+        apps.default = flake-utils.lib.mkApp {
+          drv = rivals-mod-manager;
+        };
+
+        devShells.default = craneLib.devShell {
+          inherit (commonArgs) LD_LIBRARY_PATH;
+          checks = self.checks.${system};
+          packages = with pkgs; [
+            rust-analyzer
+            rustPackages.clippy
+            tokei
+          ];
+        };
+      }
+    );
 }
