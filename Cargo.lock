@@ -2816,6 +2816,7 @@ dependencies = [
  "egui-async",
  "env_logger",
  "log",
+ "regex",
  "rfd",
  "serde",
 ]

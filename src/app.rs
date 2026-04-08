@@ -77,96 +77,102 @@ impl App {
         let mut input_folder_display = self.settings.input_folder().display().to_string();
 
         egui::CentralPanel::default().show_inside(ui, |ui| {
-            ui.heading("Settings");
-            Grid::new("settings").num_columns(2).max_col_width(600.0).show(ui, |ui| {
-                ui.label("NexusMods API Key:").on_hover_ui(|ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing.x = 0.0;
-                        ui.label("API Key used for fetching mod details from NexusMods. Go to ");
-                        ui.hyperlink_to("NexusMods", "https://www.nexusmods.com/settings/api-keys");
-                        ui.label(" to get an API Key.");
-                    });
-                });
-                ui.add(
-                    TextEdit::singleline(&mut api_key)
-                        .password(true)
-                        .desired_width(ui.available_width()),
-                );
-                ui.end_row();
-                ui.label("Game Folder:").on_hover_ui(|ui| {
-                    ui.label(format!(
-                        "The location of your Marvel Rivals Game. This should be something like \
-                         {}.",
-                        game_path()
-                    ));
-                });
+            ui.with_layout(egui::Layout::top_down_justified(egui::Align::Center), |ui| {
+                ui.set_max_width(800.0);
                 ui.horizontal(|ui| {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Browse").clicked() {
-                            self.binds.settings_game_folder.request((|| async {
-                                let dialog = rfd::AsyncFileDialog::new().pick_folder().await;
-                                Ok(dialog.map(|f| f.path().to_path_buf()).unwrap_or(game_folder))
-                            })(
-                            ));
-                        }
-                        ui.add_enabled_ui(false, |ui| {
-                            ui.add(
-                                TextEdit::singleline(&mut game_folder_display)
-                                    .desired_width(ui.available_width()),
+                    ui.heading("Settings");
+                    ui.take_available_width();
+                });
+                Grid::new("settings").num_columns(2).max_col_width(600.0).show(ui, |ui| {
+                    ui.label("NexusMods API Key:").on_hover_ui(|ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing.x = 0.0;
+                            ui.label("API Key used for fetching mod details from NexusMods. Go to ");
+                            ui.hyperlink_to("NexusMods", "https://www.nexusmods.com/settings/api-keys");
+                            ui.label(" to get an API Key.");
+                        });
+                    });
+                    ui.add(
+                        TextEdit::singleline(&mut api_key)
+                            .password(true)
+                            .desired_width(ui.available_width()),
+                    );
+                    ui.end_row();
+                    ui.label("Game Folder:").on_hover_ui(|ui| {
+                        ui.label(format!(
+                            "The location of your Marvel Rivals Game. This should be something like \
+                             {}.",
+                            game_path()
+                        ));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("Browse").clicked() {
+                                self.binds.settings_game_folder.request((|| async {
+                                    let dialog = rfd::AsyncFileDialog::new().pick_folder().await;
+                                    Ok(dialog.map(|f| f.path().to_path_buf()).unwrap_or(game_folder))
+                                })(
+                                ));
+                            }
+                            ui.add_enabled_ui(false, |ui| {
+                                ui.add(
+                                    TextEdit::singleline(&mut game_folder_display)
+                                        .desired_width(ui.available_width()),
+                                );
+                            });
+                        });
+                    });
+                    ui.end_row();
+                    ui.label("Input Folder:").on_hover_ui(|ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing.x = 0.0;
+                            ui.label(
+                                "The folder where you store your mods. This should contain folders, \
+                                 such as ",
+                            );
+                            ui.hyperlink_to(
+                                "PNG Spider Man - 5779",
+                                "https://www.nexusmods.com/marvelrivals/mods/5779",
+                            );
+                            ui.label(
+                                ", which contain the mod files (.pak files, sometimes with .ucas and \
+                                 .utoc files).",
                             );
                         });
                     });
-                });
-                ui.end_row();
-                ui.label("Input Folder:").on_hover_ui(|ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing.x = 0.0;
-                        ui.label(
-                            "The folder where you store your mods. This should contain folders, \
-                             such as ",
-                        );
-                        ui.hyperlink_to(
-                            "PNG Spider Man - 5779",
-                            "https://www.nexusmods.com/marvelrivals/mods/5779",
-                        );
-                        ui.label(
-                            ", which contain the mod files (.pak files, sometimes with .ucas and \
-                             .utoc files).",
-                        );
-                    });
-                });
-                ui.horizontal(|ui| {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Browse").clicked() {
-                            self.binds.settings_input_folder.request((|| async {
-                                let dialog = rfd::AsyncFileDialog::new().pick_folder().await;
-                                Ok(dialog.map(|f| f.path().to_path_buf()).unwrap_or(input_folder))
-                            })(
-                            ));
-                        }
-                        ui.add_enabled_ui(false, |ui| {
-                            ui.add(
-                                TextEdit::singleline(&mut input_folder_display)
-                                    .desired_width(ui.available_width()),
-                            );
+                    ui.horizontal(|ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("Browse").clicked() {
+                                self.binds.settings_input_folder.request((|| async {
+                                    let dialog = rfd::AsyncFileDialog::new().pick_folder().await;
+                                    Ok(dialog.map(|f| f.path().to_path_buf()).unwrap_or(input_folder))
+                                })(
+                                ));
+                            }
+                            ui.add_enabled_ui(false, |ui| {
+                                ui.add(
+                                    TextEdit::singleline(&mut input_folder_display)
+                                        .desired_width(ui.available_width()),
+                                );
+                            });
                         });
                     });
+                    ui.end_row();
                 });
-                ui.end_row();
+                if self.first_time_setup {
+                    ui.small("Set the game folder and input folder before setting up your mods.");
+                }
+                self.settings.set_nexusmods_api_key(api_key);
+                if let Some(Ok(x)) = self.binds.settings_game_folder.read() {
+                    self.settings.set_game_folder(x.clone());
+                }
+                if let Some(Ok(x)) = self.binds.settings_input_folder.read() {
+                    self.settings.set_input_folder(x.clone());
+                }
+                if self.settings.game_folder().exists() && self.settings.input_folder().exists() {
+                    self.first_time_setup = false;
+                }
             });
-            if self.first_time_setup {
-                ui.small("Set the game folder and input folder before setting up your mods.");
-            }
-            self.settings.set_nexusmods_api_key(api_key);
-            if let Some(Ok(x)) = self.binds.settings_game_folder.read() {
-                self.settings.set_game_folder(x.clone());
-            }
-            if let Some(Ok(x)) = self.binds.settings_input_folder.read() {
-                self.settings.set_input_folder(x.clone());
-            }
-            if self.settings.game_folder().exists() && self.settings.input_folder().exists() {
-                self.first_time_setup = false;
-            }
         });
     }
 
