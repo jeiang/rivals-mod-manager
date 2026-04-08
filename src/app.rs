@@ -1,16 +1,17 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use egui::TextEdit;
+use egui::{Grid, TextEdit};
 use egui_async::Bind;
 
 use crate::settings::Settings;
 
-#[derive(serde::Deserialize, serde::Serialize, Default)]
+#[derive(serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct App {
     current_page: Page,
     settings: Settings,
+    first_time_setup: bool,
     #[serde(skip)]
     binds: AsyncBinds,
 }
@@ -23,10 +24,21 @@ pub struct AsyncBinds {
 
 #[derive(serde::Deserialize, serde::Serialize, Default, PartialEq, Eq, Clone)]
 pub enum Page {
-    #[default]
     Main,
+    #[default]
     Settings,
     Categories,
+}
+
+impl Default for App {
+    fn default() -> Self {
+        Self {
+            current_page: Default::default(),
+            settings: Default::default(),
+            first_time_setup: true,
+            binds: Default::default(),
+        }
+    }
 }
 
 fn game_path() -> &'static str {
@@ -60,10 +72,13 @@ impl App {
     fn settings(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let game_folder = self.settings.game_folder().to_path_buf();
         let input_folder = self.settings.input_folder().to_path_buf();
+        let mut api_key = self.settings.nexusmods_api_key().to_string();
+        let mut game_folder_display = self.settings.game_folder().display().to_string();
+        let mut input_folder_display = self.settings.input_folder().display().to_string();
 
         egui::CentralPanel::default().show_inside(ui, |ui| {
             ui.heading("Settings");
-            ui.horizontal(|ui| {
+            Grid::new("settings").num_columns(2).max_col_width(600.0).show(ui, |ui| {
                 ui.label("NexusMods API Key:").on_hover_ui(|ui| {
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing.x = 0.0;
@@ -72,15 +87,12 @@ impl App {
                         ui.label(" to get an API Key.");
                     });
                 });
-                let mut api_key = self.settings.nexusmods_api_key().to_string();
                 ui.add(
                     TextEdit::singleline(&mut api_key)
                         .password(true)
-                        .desired_width(ui.available_width().min(600.0)),
+                        .desired_width(ui.available_width()),
                 );
-                self.settings.set_nexusmods_api_key(api_key);
-            });
-            ui.horizontal(|ui| {
+                ui.end_row();
                 ui.label("Game Folder:").on_hover_ui(|ui| {
                     ui.label(format!(
                         "The location of your Marvel Rivals Game. This should be something like \
@@ -88,23 +100,24 @@ impl App {
                         game_path()
                     ));
                 });
-                let mut path = self.settings.game_folder().display().to_string();
-                ui.add_enabled_ui(false, |ui| {
-                    ui.spacing_mut().text_edit_width = ui.available_width().min(600.0);
-                    ui.text_edit_singleline(&mut path);
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Browse").clicked() {
+                            self.binds.settings_game_folder.request((|| async {
+                                let dialog = rfd::AsyncFileDialog::new().pick_folder().await;
+                                Ok(dialog.map(|f| f.path().to_path_buf()).unwrap_or(game_folder))
+                            })(
+                            ));
+                        }
+                        ui.add_enabled_ui(false, |ui| {
+                            ui.add(
+                                TextEdit::singleline(&mut game_folder_display)
+                                    .desired_width(ui.available_width()),
+                            );
+                        });
+                    });
                 });
-                if ui.button("Browse").clicked() {
-                    self.binds.settings_game_folder.request((|| async {
-                        let dialog = rfd::AsyncFileDialog::new().pick_folder().await;
-                        Ok(dialog.map(|f| f.path().to_path_buf()).unwrap_or(game_folder))
-                    })());
-                }
-                if let Some(Ok(x)) = self.binds.settings_game_folder.read() {
-                    self.settings.set_game_folder(x.clone());
-                }
-            });
-            ui.horizontal(|ui| {
-                let mut path = self.settings.input_folder().display().to_string();
+                ui.end_row();
                 ui.label("Input Folder:").on_hover_ui(|ui| {
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing.x = 0.0;
@@ -122,20 +135,38 @@ impl App {
                         );
                     });
                 });
-                ui.add_enabled_ui(false, |ui| {
-                    ui.spacing_mut().text_edit_width = ui.available_width().min(600.0);
-                    ui.text_edit_singleline(&mut path);
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Browse").clicked() {
+                            self.binds.settings_input_folder.request((|| async {
+                                let dialog = rfd::AsyncFileDialog::new().pick_folder().await;
+                                Ok(dialog.map(|f| f.path().to_path_buf()).unwrap_or(input_folder))
+                            })(
+                            ));
+                        }
+                        ui.add_enabled_ui(false, |ui| {
+                            ui.add(
+                                TextEdit::singleline(&mut input_folder_display)
+                                    .desired_width(ui.available_width()),
+                            );
+                        });
+                    });
                 });
-                if ui.button("Browse").clicked() {
-                    self.binds.settings_input_folder.request((|| async {
-                        let dialog = rfd::AsyncFileDialog::new().pick_folder().await;
-                        Ok(dialog.map(|f| f.path().to_path_buf()).unwrap_or(input_folder))
-                    })());
-                }
-                if let Some(Ok(x)) = self.binds.settings_input_folder.read() {
-                    self.settings.set_input_folder(x.clone());
-                }
+                ui.end_row();
             });
+            if self.first_time_setup {
+                ui.small("Set the game folder and input folder before setting up your mods.");
+            }
+            self.settings.set_nexusmods_api_key(api_key);
+            if let Some(Ok(x)) = self.binds.settings_game_folder.read() {
+                self.settings.set_game_folder(x.clone());
+            }
+            if let Some(Ok(x)) = self.binds.settings_input_folder.read() {
+                self.settings.set_input_folder(x.clone());
+            }
+            if self.settings.game_folder().exists() && self.settings.input_folder().exists() {
+                self.first_time_setup = false;
+            }
         });
     }
 
@@ -153,6 +184,7 @@ impl eframe::App for App {
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.plugin_or_default::<egui_async::EguiAsyncPlugin>();
+        ctx.request_repaint_after_for(Duration::from_secs(1), ctx.viewport_id());
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
@@ -174,20 +206,20 @@ impl eframe::App for App {
             });
         });
 
-        match self.current_page {
-            Page::Main => {
-                self.main(ui, frame);
-            }
-            Page::Settings => {
-                self.settings(ui, frame);
-            }
-            Page::Categories => {
-                self.categories(ui, frame);
+        if self.first_time_setup {
+            self.settings(ui, frame);
+        } else {
+            match self.current_page {
+                Page::Main => {
+                    self.main(ui, frame);
+                }
+                Page::Settings => {
+                    self.settings(ui, frame);
+                }
+                Page::Categories => {
+                    self.categories(ui, frame);
+                }
             }
         }
-    }
-
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        ctx.request_repaint_after_for(Duration::from_secs(1), ctx.viewport_id());
     }
 }
