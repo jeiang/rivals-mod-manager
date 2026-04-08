@@ -14,8 +14,10 @@ targets = ["x86_64-unknown-linux-gnu", "wasm32-unknown-unknown"]
 [dependencies]
 eframe = { version = "0.34.1", features = ["persistence"] }
 egui = "0.34.1"
+egui-async = "0.4.1"
 env_logger = "0.11.8"
 log = "0.4.27"
+rfd = "0.17.2"
 serde = { version = "1.0.219", features = ["derive"] }
 
 [profile.release]

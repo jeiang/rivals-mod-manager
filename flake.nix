@@ -6,6 +6,11 @@
 
     crane.url = "github:ipetkov/crane";
 
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
     flake-utils.url = "github:numtide/flake-utils";
 
     advisory-db = {
@@ -19,6 +24,7 @@
       self,
       nixpkgs,
       crane,
+      rust-overlay,
       flake-utils,
       advisory-db,
       ...
@@ -26,11 +32,20 @@
     flake-utils.lib.eachDefaultSystem (
       system:
       let
-        pkgs = nixpkgs.legacyPackages.${system};
+        pkgs = import nixpkgs {
+          inherit system;
+          overlays = [ (import rust-overlay) ];
+        };
 
         inherit (pkgs) lib;
 
-        craneLib = crane.mkLib pkgs;
+        craneLib = (crane.mkLib pkgs).overrideToolchain (
+          p:
+          p.rust-bin.nightly.latest.default.override {
+            targets = [ "x86_64-pc-windows-msvc" "x86_64-unknown-linux-musl" ];
+          }
+        );
+
         src = let
           eguiAssets = path: _type: builtins.match ".*\.png$" path != null;
           filters = path: type:
@@ -50,6 +65,7 @@
 
             # misc. libraries
             openssl
+            dbus
             pkg-config
 
             # GUI libs

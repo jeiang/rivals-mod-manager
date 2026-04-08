@@ -1,4 +1,4 @@
-#![warn(clippy::all, rust_2018_idioms)]
+#![deny(clippy::all)]
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
 
 fn main() -> eframe::Result {
@@ -15,8 +15,8 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "eframe template",
+        "rivals-mod-manager",
         native_options,
-        Box::new(|cc| Ok(Box::new(rivals_mod_manager::TemplateApp::new(cc)))),
+        Box::new(|cc| Ok(Box::new(rivals_mod_manager::App::new(cc)))),
     )
 }

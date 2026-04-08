@@ -1,4 +1,6 @@
-#![warn(clippy::all, rust_2018_idioms)]
+#![deny(clippy::all)]
 
 mod app;
-pub use app::TemplateApp;
+mod settings;
+
+pub use app::App;

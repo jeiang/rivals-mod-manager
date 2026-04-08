@@ -1,109 +1,193 @@
-/// We derive Deserialize/Serialize so we can persist app state on shutdown.
-#[derive(serde::Deserialize, serde::Serialize)]
-#[serde(default)] // if we add new fields, give them default values when deserializing old state
-pub struct TemplateApp {
-    // Example stuff:
-    label: String,
+use std::path::PathBuf;
+use std::time::Duration;
 
-    #[serde(skip)] // This how you opt-out of serialization of a field
-    value: f32,
+use egui::TextEdit;
+use egui_async::Bind;
+
+use crate::settings::Settings;
+
+#[derive(serde::Deserialize, serde::Serialize, Default)]
+#[serde(default)]
+pub struct App {
+    current_page: Page,
+    settings: Settings,
+    #[serde(skip)]
+    binds: AsyncBinds,
 }
 
-impl Default for TemplateApp {
-    fn default() -> Self {
-        Self {
-            // Example stuff:
-            label: "Hello World!".to_owned(),
-            value: 2.7,
-        }
+#[derive(Default)]
+pub struct AsyncBinds {
+    settings_game_folder: Bind<PathBuf, ()>,
+    settings_input_folder: Bind<PathBuf, ()>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize, Default, PartialEq, Eq, Clone)]
+pub enum Page {
+    #[default]
+    Main,
+    Settings,
+    Categories,
+}
+
+fn game_path() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "C:\\Program Files (x86)\\Steam\\steamapps\\common\\MarvelRivals"
+    }
+    #[cfg(target_os = "linux")]
+    {
+        "$HOME/.local/share/Steam/steamapps/common/MarvelRivals"
     }
 }
 
-impl TemplateApp {
-    /// Called once before the first frame.
+impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        // This is also where you can customize the look and feel of egui using
-        // `cc.egui_ctx.set_visuals` and `cc.egui_ctx.set_fonts`.
-
-        // Load previous app state (if any).
-        // Note that you must enable the `persistence` feature for this to work.
+        let ctx = &cc.egui_ctx;
+        ctx.set_zoom_factor(2.0);
         if let Some(storage) = cc.storage {
             eframe::get_value(storage, eframe::APP_KEY).unwrap_or_default()
         } else {
             Default::default()
         }
     }
+
+    fn main(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        egui::CentralPanel::default().show_inside(ui, |ui| {
+            ui.label(":)");
+        });
+    }
+
+    fn settings(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let game_folder = self.settings.game_folder().to_path_buf();
+        let input_folder = self.settings.input_folder().to_path_buf();
+
+        egui::CentralPanel::default().show_inside(ui, |ui| {
+            ui.heading("Settings");
+            ui.horizontal(|ui| {
+                ui.label("NexusMods API Key:").on_hover_ui(|ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        ui.label("API Key used for fetching mod details from NexusMods. Go to ");
+                        ui.hyperlink_to("NexusMods", "https://www.nexusmods.com/settings/api-keys");
+                        ui.label(" to get an API Key.");
+                    });
+                });
+                let mut api_key = self.settings.nexusmods_api_key().to_string();
+                ui.add(
+                    TextEdit::singleline(&mut api_key)
+                        .password(true)
+                        .desired_width(ui.available_width().min(600.0)),
+                );
+                self.settings.set_nexusmods_api_key(api_key);
+            });
+            ui.horizontal(|ui| {
+                ui.label("Game Folder:").on_hover_ui(|ui| {
+                    ui.label(format!(
+                        "The location of your Marvel Rivals Game. This should be something like \
+                         {}.",
+                        game_path()
+                    ));
+                });
+                let mut path = self.settings.game_folder().display().to_string();
+                ui.add_enabled_ui(false, |ui| {
+                    ui.spacing_mut().text_edit_width = ui.available_width().min(600.0);
+                    ui.text_edit_singleline(&mut path);
+                });
+                if ui.button("Browse").clicked() {
+                    self.binds.settings_game_folder.request((|| async {
+                        let dialog = rfd::AsyncFileDialog::new().pick_folder().await;
+                        Ok(dialog.map(|f| f.path().to_path_buf()).unwrap_or(game_folder))
+                    })());
+                }
+                if let Some(Ok(x)) = self.binds.settings_game_folder.read() {
+                    self.settings.set_game_folder(x.clone());
+                }
+            });
+            ui.horizontal(|ui| {
+                let mut path = self.settings.input_folder().display().to_string();
+                ui.label("Input Folder:").on_hover_ui(|ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        ui.label(
+                            "The folder where you store your mods. This should contain folders, \
+                             such as ",
+                        );
+                        ui.hyperlink_to(
+                            "PNG Spider Man - 5779",
+                            "https://www.nexusmods.com/marvelrivals/mods/5779",
+                        );
+                        ui.label(
+                            ", which contain the mod files (.pak files, sometimes with .ucas and \
+                             .utoc files).",
+                        );
+                    });
+                });
+                ui.add_enabled_ui(false, |ui| {
+                    ui.spacing_mut().text_edit_width = ui.available_width().min(600.0);
+                    ui.text_edit_singleline(&mut path);
+                });
+                if ui.button("Browse").clicked() {
+                    self.binds.settings_input_folder.request((|| async {
+                        let dialog = rfd::AsyncFileDialog::new().pick_folder().await;
+                        Ok(dialog.map(|f| f.path().to_path_buf()).unwrap_or(input_folder))
+                    })());
+                }
+                if let Some(Ok(x)) = self.binds.settings_input_folder.read() {
+                    self.settings.set_input_folder(x.clone());
+                }
+            });
+        });
+    }
+
+    fn categories(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        egui::CentralPanel::default().show_inside(ui, |ui| {
+            ui.label(":(");
+        });
+    }
 }
 
-impl eframe::App for TemplateApp {
-    /// Called by the framework to save state before shutdown.
+impl eframe::App for App {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, eframe::APP_KEY, self);
     }
 
-    /// Called each time the UI needs repainting, which may be many times per second.
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        // Put your widgets into a `SidePanel`, `TopBottomPanel`, `CentralPanel`, `Window` or `Area`.
-        // For inspiration and more examples, go to https://emilk.github.io/egui
-
-        egui::Panel::top("top_panel").show_inside(ui, |ui| {
-            // The top panel is often a good place for a menu bar:
-
-            egui::MenuBar::new().ui(ui, |ui| {
-                // NOTE: no File->Quit on web pages!
-                let is_web = cfg!(target_arch = "wasm32");
-                if !is_web {
-                    ui.menu_button("File", |ui| {
-                        if ui.button("Quit").clicked() {
-                            ui.send_viewport_cmd(egui::ViewportCommand::Close);
-                        }
-                    });
-                    ui.add_space(16.0);
-                }
-
-                egui::widgets::global_theme_preference_buttons(ui);
-            });
-        });
-
-        egui::CentralPanel::default().show_inside(ui, |ui| {
-            // The central panel the region left after adding TopPanel's and SidePanel's
-            ui.heading("eframe template");
-
-            ui.horizontal(|ui| {
-                ui.label("Write something: ");
-                ui.text_edit_singleline(&mut self.label);
-            });
-
-            ui.add(egui::Slider::new(&mut self.value, 0.0..=10.0).text("value"));
-            if ui.button("Increment").clicked() {
-                self.value += 1.0;
-            }
-
-            ui.separator();
-
-            ui.add(egui::github_link_file!(
-                "https://github.com/emilk/eframe_template/blob/main/",
-                "Source code."
-            ));
-
-            ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                powered_by_egui_and_eframe(ui);
-                egui::warn_if_debug_build(ui);
-            });
-        });
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        ctx.plugin_or_default::<egui_async::EguiAsyncPlugin>();
     }
-}
 
-fn powered_by_egui_and_eframe(ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 0.0;
-        ui.label("Powered by ");
-        ui.hyperlink_to("egui", "https://github.com/emilk/egui");
-        ui.label(" and ");
-        ui.hyperlink_to(
-            "eframe",
-            "https://github.com/emilk/egui/tree/master/crates/eframe",
-        );
-        ui.label(".");
-    });
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        egui::Panel::top("top_panel").show_inside(ui, |ui| {
+            egui::MenuBar::new().ui(ui, |ui| {
+                ui.menu_button("File", |ui| {
+                    if ui.button("Quit").clicked() {
+                        ui.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                });
+                ui.separator();
+                ui.selectable_value(&mut self.current_page, Page::Main, "Mods");
+                ui.selectable_value(&mut self.current_page, Page::Settings, "Settings");
+                ui.selectable_value(&mut self.current_page, Page::Categories, "Categories");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    egui::widgets::global_theme_preference_buttons(ui);
+                    ui.take_available_space();
+                });
+            });
+        });
+
+        match self.current_page {
+            Page::Main => {
+                self.main(ui, frame);
+            }
+            Page::Settings => {
+                self.settings(ui, frame);
+            }
+            Page::Categories => {
+                self.categories(ui, frame);
+            }
+        }
+    }
+
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        ctx.request_repaint_after_for(Duration::from_secs(1), ctx.viewport_id());
+    }
 }
