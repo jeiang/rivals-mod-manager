@@ -15,6 +15,8 @@ targets = ["x86_64-unknown-linux-gnu", "wasm32-unknown-unknown"]
 eframe = { version = "0.34.1", features = ["persistence"] }
 egui = "0.34.1"
 egui-async = "0.4.1"
+egui_extras = "0.34.1"
+egui_material_icons = { version = "0.6.0", features = ["compressed", "outline"] }
 env_logger = "0.11.8"
 log = "0.4.27"
 regex = "1.12.3"

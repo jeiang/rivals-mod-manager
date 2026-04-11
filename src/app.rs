@@ -1,10 +1,14 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use egui::{Grid, TextEdit};
+use egui::{Grid, Id, Layout, Modal, ScrollArea, TextEdit};
 use egui_async::Bind;
+use egui_material_icons::icons::ICON_DELETE;
 
-use crate::settings::Settings;
+use crate::{
+    categories::{CategoryMatchers, MatchType, Matcher, default_matchers},
+    settings::Settings,
+};
 
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(default)]
@@ -13,13 +17,18 @@ pub struct App {
     settings: Settings,
     first_time_setup: bool,
     #[serde(skip)]
-    binds: AsyncBinds,
+    inputs: InputControls,
+    categories: CategoryMatchers,
 }
 
 #[derive(Default)]
-pub struct AsyncBinds {
+pub struct InputControls {
     settings_game_folder: Bind<PathBuf, ()>,
     settings_input_folder: Bind<PathBuf, ()>,
+    categories_new_category: String,
+    categories_modal_is_open: bool,
+    categories_modal_idx: usize,
+    categories_modal_matchers: Vec<Matcher>,
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Default, PartialEq, Eq, Clone)]
@@ -36,7 +45,8 @@ impl Default for App {
             current_page: Default::default(),
             settings: Default::default(),
             first_time_setup: true,
-            binds: Default::default(),
+            inputs: Default::default(),
+            categories: default_matchers(),
         }
     }
 }
@@ -56,6 +66,8 @@ impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let ctx = &cc.egui_ctx;
         ctx.set_zoom_factor(2.0);
+        egui_material_icons::initialize(ctx);
+        ctx.plugin_or_default::<egui_async::EguiAsyncPlugin>();
         if let Some(storage) = cc.storage {
             eframe::get_value(storage, eframe::APP_KEY).unwrap_or_default()
         } else {
@@ -63,13 +75,13 @@ impl App {
         }
     }
 
-    fn main(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn main_page(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show_inside(ui, |ui| {
             ui.label(":)");
         });
     }
 
-    fn settings(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn settings_page(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let game_folder = self.settings.game_folder().to_path_buf();
         let input_folder = self.settings.input_folder().to_path_buf();
         let mut api_key = self.settings.nexusmods_api_key().to_string();
@@ -108,7 +120,7 @@ impl App {
                     ui.horizontal(|ui| {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.button("Browse").clicked() {
-                                self.binds.settings_game_folder.request((|| async {
+                                self.inputs.settings_game_folder.request((|| async {
                                     let dialog = rfd::AsyncFileDialog::new().pick_folder().await;
                                     Ok(dialog.map(|f| f.path().to_path_buf()).unwrap_or(game_folder))
                                 })(
@@ -143,7 +155,7 @@ impl App {
                     ui.horizontal(|ui| {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.button("Browse").clicked() {
-                                self.binds.settings_input_folder.request((|| async {
+                                self.inputs.settings_input_folder.request((|| async {
                                     let dialog = rfd::AsyncFileDialog::new().pick_folder().await;
                                     Ok(dialog.map(|f| f.path().to_path_buf()).unwrap_or(input_folder))
                                 })(
@@ -163,10 +175,10 @@ impl App {
                     ui.small("Set the game folder and input folder before setting up your mods.");
                 }
                 self.settings.set_nexusmods_api_key(api_key);
-                if let Some(Ok(x)) = self.binds.settings_game_folder.read() {
+                if let Some(Ok(x)) = self.inputs.settings_game_folder.read() {
                     self.settings.set_game_folder(x.clone());
                 }
-                if let Some(Ok(x)) = self.binds.settings_input_folder.read() {
+                if let Some(Ok(x)) = self.inputs.settings_input_folder.read() {
                     self.settings.set_input_folder(x.clone());
                 }
                 if self.settings.game_folder().exists() && self.settings.input_folder().exists() {
@@ -176,9 +188,176 @@ impl App {
         });
     }
 
-    fn categories(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn categories_page(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show_inside(ui, |ui| {
-            ui.label(":(");
+            ui.with_layout(egui::Layout::top_down_justified(egui::Align::Center), |ui| {
+                ui.set_max_width(800.0);
+                ui.horizontal(|ui| {
+                    ui.heading("Category Management");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Use Default Matchers").clicked() {
+                            self.categories = default_matchers();
+                        }
+                        if ui.button("Sort").clicked() {
+                            self.categories.sort();
+                        }
+                    });
+                });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label("Add Category: ");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let button = ui.button("Add");
+                        let text = ui.add(
+                            TextEdit::singleline(&mut self.inputs.categories_new_category)
+                                .desired_width(ui.available_width()),
+                        );
+                        if button.clicked()
+                            || (text.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                        {
+                            let item = self.categories.iter().position(|e| {
+                                e.name().eq_ignore_ascii_case(
+                                    &self.inputs.categories_new_category.clone(),
+                                )
+                            });
+                            if item.is_none() {
+                                self.categories.push(
+                                    (self.inputs.categories_new_category.clone(), vec![]).into(),
+                                );
+                            }
+
+                            self.inputs.categories_new_category.clear();
+                        }
+                    });
+                });
+                ui.separator();
+                let mut is_second_col = false;
+                let mut should_remove = None;
+                ScrollArea::vertical().show(ui, |ui| {
+                    Grid::new("settings")
+                        .striped(true)
+                        .spacing([0., ui.spacing().item_spacing.y])
+                        .num_columns(4)
+                        .max_col_width(200.0)
+                        .min_col_width(200.0)
+                        .show(ui, |ui| {
+                            for (idx, category) in self.categories.iter().enumerate().clone() {
+                                ui.with_layout(Layout::left_to_right(egui::Align::Center), |ui| {
+                                    ui.vertical(|ui| {
+                                        ui.label(category.name());
+                                        ui.small(format!(
+                                            "{} matcher(s)",
+                                            category.matchers().len()
+                                        ));
+                                    });
+                                });
+                                ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.add_space(ui.spacing().item_spacing.x);
+                                    if ui.button(ICON_DELETE.outlined()).clicked() {
+                                        should_remove = Some(idx);
+                                        ui.ctx().request_repaint();
+                                    }
+                                    if ui.button("Edit Matchers").clicked() {
+                                        self.inputs.categories_modal_is_open = true;
+                                        self.inputs.categories_modal_idx = idx;
+                                        self.inputs.categories_modal_matchers =
+                                            category.matchers().into();
+                                    }
+                                    ui.take_available_width();
+                                });
+                                if is_second_col {
+                                    ui.end_row();
+                                }
+                                is_second_col = !is_second_col;
+                            }
+                        });
+                });
+
+                if let Some(idx) = should_remove {
+                    self.categories.remove(idx);
+                }
+
+                if self.inputs.categories_modal_is_open {
+                    let modal = Modal::new(Id::new("Category Edit Modal")).show(ui.ctx(), |ui| {
+                        ui.set_width(500.0);
+                        ui.heading(format!(
+                            "Edit \"{}\" Matchers",
+                            self.categories[self.inputs.categories_modal_idx].name()
+                        ));
+                        let mut to_remove = None;
+                        Grid::new("Matcher Modal").num_columns(1).show(ui, |ui| {
+                            for (idx, matcher) in
+                                self.inputs.categories_modal_matchers.iter_mut().enumerate()
+                            {
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui.button(ICON_DELETE).clicked() {
+                                            to_remove = Some(idx);
+                                        }
+                                        ui.push_id(idx, |ui| {
+                                            egui::ComboBox::from_id_salt("matcher-type")
+                                                .selected_text(matcher.matcher_type().name())
+                                                .show_ui(ui, |ui| {
+                                                    ui.selectable_value(
+                                                        matcher.matcher_type_mut(),
+                                                        MatchType::Plain,
+                                                        MatchType::Plain.name(),
+                                                    );
+                                                    ui.selectable_value(
+                                                        matcher.matcher_type_mut(),
+                                                        MatchType::Regex,
+                                                        MatchType::Regex.name(),
+                                                    );
+                                                });
+                                        });
+                                        ui.add(
+                                            TextEdit::singleline(matcher.value_mut())
+                                                .desired_width(ui.available_width()),
+                                        );
+                                        ui.ctx().request_repaint();
+                                    },
+                                );
+                                ui.end_row();
+                            }
+                        });
+                        if let Some(idx) = to_remove {
+                            self.inputs.categories_modal_matchers.remove(idx);
+                        }
+                        ui.horizontal(|ui| {
+                            if ui.button("Add Matcher").clicked() {
+                                self.inputs.categories_modal_matchers.push(Matcher::new(
+                                    String::new(),
+                                    crate::categories::MatchType::Plain,
+                                ));
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.button("Save").clicked() {
+                                        let mapped = self
+                                            .inputs
+                                            .categories_modal_matchers
+                                            .drain(0..)
+                                            .filter(|e| !e.value().is_empty())
+                                            .collect();
+                                        self.categories[self.inputs.categories_modal_idx]
+                                            .set_matchers(mapped);
+                                        ui.close();
+                                    }
+                                    if ui.button("Cancel").clicked() {
+                                        ui.close();
+                                    }
+                                    ui.take_available_width();
+                                },
+                            );
+                        });
+                    });
+                    if modal.should_close() {
+                        self.inputs.categories_modal_is_open = false;
+                    }
+                }
+            });
         });
     }
 }
@@ -189,7 +368,6 @@ impl eframe::App for App {
     }
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        ctx.plugin_or_default::<egui_async::EguiAsyncPlugin>();
         ctx.request_repaint_after_for(Duration::from_secs(1), ctx.viewport_id());
     }
 
@@ -213,17 +391,17 @@ impl eframe::App for App {
         });
 
         if self.first_time_setup {
-            self.settings(ui, frame);
+            self.settings_page(ui, frame);
         } else {
             match self.current_page {
                 Page::Main => {
-                    self.main(ui, frame);
+                    self.main_page(ui, frame);
                 }
                 Page::Settings => {
-                    self.settings(ui, frame);
+                    self.settings_page(ui, frame);
                 }
                 Page::Categories => {
-                    self.categories(ui, frame);
+                    self.categories_page(ui, frame);
                 }
             }
         }
