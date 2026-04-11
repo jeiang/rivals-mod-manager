@@ -282,7 +282,6 @@ pub fn default_matchers() -> CategoryMatchers {
             "Wolverine",
             vec![Matcher::new("wolverine".into(), Plain), Matcher::new("logan".into(), Plain)],
         ),
-        ("Uncategorized", vec![]),
     ]
     .into_iter()
     .map(|e| e.into())

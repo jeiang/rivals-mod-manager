@@ -1,5 +1,5 @@
-use std::path::PathBuf;
 use std::time::Duration;
+use std::{f32, path::PathBuf};
 
 use egui::{Grid, Id, Layout, Modal, ScrollArea, TextEdit};
 use egui_async::Bind;
@@ -21,6 +21,14 @@ pub struct App {
     categories: CategoryMatchers,
 }
 
+#[derive(Default, PartialEq)]
+pub enum CategoryFilter {
+    #[default]
+    None,
+    Uncategorized,
+    Category(String),
+}
+
 #[derive(Default)]
 pub struct InputControls {
     settings_game_folder: Bind<PathBuf, ()>,
@@ -29,6 +37,7 @@ pub struct InputControls {
     categories_modal_is_open: bool,
     categories_modal_idx: usize,
     categories_modal_matchers: Vec<Matcher>,
+    mods_category_filter: CategoryFilter,
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Default, PartialEq, Eq, Clone)]
@@ -76,6 +85,33 @@ impl App {
     }
 
     fn main_page(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        egui::Panel::left("categories_panel")
+            .show_separator_line(true)
+            .min_size(200.0)
+            .show_inside(ui, |ui| {
+                ui.heading("Categories");
+                ui.with_layout(Layout::top_down_justified(egui::Align::Min), |ui| {
+                    ScrollArea::vertical().max_width(f32::INFINITY).show(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.inputs.mods_category_filter,
+                            CategoryFilter::None,
+                            "All",
+                        );
+                        for i in self.categories.iter() {
+                            ui.selectable_value(
+                                &mut self.inputs.mods_category_filter,
+                                CategoryFilter::Category(i.name().to_string()),
+                                i.name(),
+                            );
+                        }
+                        ui.selectable_value(
+                            &mut self.inputs.mods_category_filter,
+                            CategoryFilter::Uncategorized,
+                            "Uncategorized",
+                        );
+                    });
+                });
+            });
         egui::CentralPanel::default().show_inside(ui, |ui| {
             ui.label(":)");
         });
