@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-#[derive(serde::Deserialize, serde::Serialize, Default)]
+#[derive(serde::Deserialize, serde::Serialize, Default, Clone)]
 pub struct Settings {
     nexusmods_api_key: String,
     game_folder: PathBuf,

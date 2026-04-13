@@ -1,14 +1,14 @@
+use std::path::PathBuf;
 use std::time::Duration;
-use std::{f32, path::PathBuf};
+use std::{f32, io};
 
 use egui::{Grid, Id, Layout, Modal, ScrollArea, TextEdit};
 use egui_async::Bind;
 use egui_material_icons::icons::ICON_DELETE;
 
-use crate::{
-    categories::{CategoryMatchers, MatchType, Matcher, default_matchers},
-    settings::Settings,
-};
+use crate::categories::{CategoryMatcher, CategoryMatchers, default_matchers};
+use crate::mods::{ModInfo, refresh_mod_list};
+use crate::settings::Settings;
 
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(default)]
@@ -19,6 +19,7 @@ pub struct App {
     #[serde(skip)]
     inputs: InputControls,
     categories: CategoryMatchers,
+    mods: Vec<ModInfo>,
 }
 
 #[derive(Default, PartialEq)]
@@ -36,8 +37,11 @@ pub struct InputControls {
     categories_new_category: String,
     categories_modal_is_open: bool,
     categories_modal_idx: usize,
-    categories_modal_matchers: Vec<Matcher>,
+    categories_modal_matchers: Vec<String>,
     mods_category_filter: CategoryFilter,
+    mods_name_filter: String,
+    mods_refresh_list: Bind<Vec<ModInfo>, io::Error>,
+    misc_needs_save: bool,
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Default, PartialEq, Eq, Clone)]
@@ -56,11 +60,12 @@ impl Default for App {
             first_time_setup: true,
             inputs: Default::default(),
             categories: default_matchers(),
+            mods: vec![],
         }
     }
 }
 
-fn game_path() -> &'static str {
+const fn game_path() -> &'static str {
     #[cfg(target_os = "windows")]
     {
         "C:\\Program Files (x86)\\Steam\\steamapps\\common\\MarvelRivals"
@@ -78,9 +83,18 @@ impl App {
         egui_material_icons::initialize(ctx);
         ctx.plugin_or_default::<egui_async::EguiAsyncPlugin>();
         if let Some(storage) = cc.storage {
+            log::debug!("Storage loading...");
             eframe::get_value(storage, eframe::APP_KEY).unwrap_or_default()
         } else {
-            Default::default()
+            // TODO: do not override anymore
+            let prev = Self::default();
+            let mut settings = Settings::default();
+            settings.set_game_folder(PathBuf::from(
+                "/home/aidanp/.local/share/Steam/steamapps/common/MarvelRivals",
+            ));
+            settings
+                .set_input_folder(PathBuf::from("/home/aidanp/Games/Mods/Marvel Rivals/downloads"));
+            Self { settings, ..prev }
         }
     }
 
@@ -113,7 +127,32 @@ impl App {
                 });
             });
         egui::CentralPanel::default().show_inside(ui, |ui| {
-            ui.label(":)");
+            ui.heading("Mods");
+            ui.horizontal(|ui| {
+                ui.add(
+                    TextEdit::singleline(&mut self.inputs.mods_name_filter)
+                        .hint_text("Filter mods..."),
+                );
+                ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Apply Mods").clicked() {
+                        // TODO:
+                    }
+                    if ui.button("Clear Mods").clicked() {
+                        // TODO:
+                    }
+                    if ui.button("Refresh Mods").clicked() {
+                        let name = self.settings.input_folder().clone();
+                        let matchers = self.categories.clone();
+                        self.inputs
+                            .mods_refresh_list
+                            .request((|| async move { refresh_mod_list(&name, &matchers).await })());
+                    }
+                });
+            });
+            if let Some(Ok(modlist)) = self.inputs.mods_refresh_list.read() {
+                self.mods = dbg!(modlist.to_vec());
+                self.inputs.mods_refresh_list.clear();
+            }
         });
     }
 
@@ -135,8 +174,13 @@ impl App {
                     ui.label("NexusMods API Key:").on_hover_ui(|ui| {
                         ui.horizontal_wrapped(|ui| {
                             ui.spacing_mut().item_spacing.x = 0.0;
-                            ui.label("API Key used for fetching mod details from NexusMods. Go to ");
-                            ui.hyperlink_to("NexusMods", "https://www.nexusmods.com/settings/api-keys");
+                            ui.label(
+                                "API Key used for fetching mod details from NexusMods. Go to ",
+                            );
+                            ui.hyperlink_to(
+                                "NexusMods",
+                                "https://www.nexusmods.com/settings/api-keys",
+                            );
                             ui.label(" to get an API Key.");
                         });
                     });
@@ -148,8 +192,8 @@ impl App {
                     ui.end_row();
                     ui.label("Game Folder:").on_hover_ui(|ui| {
                         ui.label(format!(
-                            "The location of your Marvel Rivals Game. This should be something like \
-                             {}.",
+                            "The location of your Marvel Rivals Game. This should be something \
+                             like {}.",
                             game_path()
                         ));
                     });
@@ -158,7 +202,9 @@ impl App {
                             if ui.button("Browse").clicked() {
                                 self.inputs.settings_game_folder.request((|| async {
                                     let dialog = rfd::AsyncFileDialog::new().pick_folder().await;
-                                    Ok(dialog.map(|f| f.path().to_path_buf()).unwrap_or(game_folder))
+                                    Ok(dialog
+                                        .map(|f| f.path().to_path_buf())
+                                        .unwrap_or(game_folder))
                                 })(
                                 ));
                             }
@@ -175,16 +221,16 @@ impl App {
                         ui.horizontal_wrapped(|ui| {
                             ui.spacing_mut().item_spacing.x = 0.0;
                             ui.label(
-                                "The folder where you store your mods. This should contain folders, \
-                                 such as ",
+                                "The folder where you store your mods. This should contain \
+                                 folders, such as ",
                             );
                             ui.hyperlink_to(
                                 "PNG Spider Man - 5779",
                                 "https://www.nexusmods.com/marvelrivals/mods/5779",
                             );
                             ui.label(
-                                ", which contain the mod files (.pak files, sometimes with .ucas and \
-                                 .utoc files).",
+                                ", which contain the mod files (.pak files, sometimes with .ucas \
+                                 and .utoc files).",
                             );
                         });
                     });
@@ -193,7 +239,9 @@ impl App {
                             if ui.button("Browse").clicked() {
                                 self.inputs.settings_input_folder.request((|| async {
                                     let dialog = rfd::AsyncFileDialog::new().pick_folder().await;
-                                    Ok(dialog.map(|f| f.path().to_path_buf()).unwrap_or(input_folder))
+                                    Ok(dialog
+                                        .map(|f| f.path().to_path_buf())
+                                        .unwrap_or(input_folder))
                                 })(
                                 ));
                             }
@@ -213,9 +261,11 @@ impl App {
                 self.settings.set_nexusmods_api_key(api_key);
                 if let Some(Ok(x)) = self.inputs.settings_game_folder.read() {
                     self.settings.set_game_folder(x.clone());
+                    self.inputs.settings_game_folder.clear();
                 }
                 if let Some(Ok(x)) = self.inputs.settings_input_folder.read() {
                     self.settings.set_input_folder(x.clone());
+                    self.inputs.settings_input_folder.clear();
                 }
                 if self.settings.game_folder().exists() && self.settings.input_folder().exists() {
                     self.first_time_setup = false;
@@ -235,7 +285,7 @@ impl App {
                             self.categories = default_matchers();
                         }
                         if ui.button("Sort").clicked() {
-                            self.categories.sort();
+                            self.categories.sort_unstable_by(|l, r| l.name().cmp(r.name()));
                         }
                     });
                 });
@@ -257,9 +307,10 @@ impl App {
                                 )
                             });
                             if item.is_none() {
-                                self.categories.push(
-                                    (self.inputs.categories_new_category.clone(), vec![]).into(),
-                                );
+                                self.categories.push(CategoryMatcher::new(
+                                    self.inputs.categories_new_category.clone(),
+                                    vec![],
+                                ));
                             }
 
                             self.inputs.categories_new_category.clear();
@@ -296,8 +347,11 @@ impl App {
                                     if ui.button("Edit Matchers").clicked() {
                                         self.inputs.categories_modal_is_open = true;
                                         self.inputs.categories_modal_idx = idx;
-                                        self.inputs.categories_modal_matchers =
-                                            category.matchers().into();
+                                        self.inputs.categories_modal_matchers = category
+                                            .matchers()
+                                            .into_iter()
+                                            .map(|m| m.to_string())
+                                            .collect();
                                     }
                                     ui.take_available_width();
                                 });
@@ -331,27 +385,10 @@ impl App {
                                         if ui.button(ICON_DELETE).clicked() {
                                             to_remove = Some(idx);
                                         }
-                                        ui.push_id(idx, |ui| {
-                                            egui::ComboBox::from_id_salt("matcher-type")
-                                                .selected_text(matcher.matcher_type().name())
-                                                .show_ui(ui, |ui| {
-                                                    ui.selectable_value(
-                                                        matcher.matcher_type_mut(),
-                                                        MatchType::Plain,
-                                                        MatchType::Plain.name(),
-                                                    );
-                                                    ui.selectable_value(
-                                                        matcher.matcher_type_mut(),
-                                                        MatchType::Regex,
-                                                        MatchType::Regex.name(),
-                                                    );
-                                                });
-                                        });
                                         ui.add(
-                                            TextEdit::singleline(matcher.value_mut())
+                                            TextEdit::singleline(matcher)
                                                 .desired_width(ui.available_width()),
                                         );
-                                        ui.ctx().request_repaint();
                                     },
                                 );
                                 ui.end_row();
@@ -362,24 +399,28 @@ impl App {
                         }
                         ui.horizontal(|ui| {
                             if ui.button("Add Matcher").clicked() {
-                                self.inputs.categories_modal_matchers.push(Matcher::new(
-                                    String::new(),
-                                    crate::categories::MatchType::Plain,
-                                ));
+                                self.inputs.categories_modal_matchers.push(String::new());
                             }
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
                                     if ui.button("Save").clicked() {
-                                        let mapped = self
+                                        let new_matchers = self
                                             .inputs
                                             .categories_modal_matchers
-                                            .drain(0..)
-                                            .filter(|e| !e.value().is_empty())
-                                            .collect();
-                                        self.categories[self.inputs.categories_modal_idx]
-                                            .set_matchers(mapped);
-                                        ui.close();
+                                            .iter()
+                                            .map_while(|m| lazy_regex::Regex::new(m).ok())
+                                            .collect::<Vec<_>>();
+                                        if self.inputs.categories_modal_matchers.len()
+                                            > new_matchers.len()
+                                        {
+                                            // TODO: if len mismatch, one of the
+                                            // inputs failed regex parsing
+                                        } else {
+                                            self.categories[self.inputs.categories_modal_idx]
+                                                .set_matchers(new_matchers);
+                                            ui.close();
+                                        }
                                     }
                                     if ui.button("Cancel").clicked() {
                                         ui.close();
@@ -399,8 +440,17 @@ impl App {
 }
 
 impl eframe::App for App {
+    fn auto_save_interval(&self) -> std::time::Duration {
+        if self.inputs.misc_needs_save {
+            std::time::Duration::from_secs(0)
+        } else {
+            std::time::Duration::from_secs(30)
+        }
+    }
+
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, eframe::APP_KEY, self);
+        self.inputs.misc_needs_save = false;
     }
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -428,6 +478,7 @@ impl eframe::App for App {
 
         if self.first_time_setup {
             self.settings_page(ui, frame);
+            self.current_page = Page::Settings;
         } else {
             match self.current_page {
                 Page::Main => {

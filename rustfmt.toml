@@ -28,7 +28,7 @@ condense_wildcard_suffixes = true     # Merge nested paths with a wildcard where
 wrap_comments = true      # Wrap doc and regular comments
 comment_width = 80        # Maximum width for comments
 normalize_comments = true # Convert block comments to line comments if clearer
-format_strings = true     # Reformat string literals where safe
+format_strings = false    # Reformat string literals where safe
 
 ########################################
 # Whitespace and Layout
