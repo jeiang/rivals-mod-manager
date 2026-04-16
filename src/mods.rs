@@ -8,6 +8,29 @@ use lazy_regex::regex_captures;
 
 use crate::categories::{CategoryMatcher, match_category};
 
+#[derive(serde::Deserialize, serde::Serialize, Default)]
+pub struct ModList {
+    mods: Vec<ModInfo>,
+}
+
+impl ModList {
+    pub fn new(mods: Vec<ModInfo>) -> Self {
+        Self { mods }
+    }
+
+    pub fn set_mods(&mut self, mods: Vec<ModInfo>) {
+        self.mods = mods;
+    }
+
+    pub fn mods(&self) -> &[ModInfo] {
+        &self.mods
+    }
+
+    pub fn mods_mut(&mut self) -> &mut Vec<ModInfo> {
+        &mut self.mods
+    }
+}
+
 #[derive(Default, Debug, serde::Deserialize, serde::Serialize, Clone)]
 pub struct ModInfo {
     path: PathBuf,

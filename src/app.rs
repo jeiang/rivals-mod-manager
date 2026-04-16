@@ -2,14 +2,14 @@ use std::path::PathBuf;
 use std::time::Duration;
 use std::{f32, io};
 
-use egui::{Align2, Direction, Grid, Id, Layout, Modal, ScrollArea, TextEdit};
+use egui::{Align2, Direction, Grid, Id, Layout, Modal, ScrollArea, TextEdit, Ui};
 use egui_async::Bind;
 use egui_material_icons::icons::ICON_DELETE;
 use egui_toast::{Toast, ToastOptions, Toasts};
 use regex::Regex;
 
 use crate::categories::{CategoryMatcher, CategoryMatchers, default_matchers};
-use crate::mods::{ModInfo, refresh_mod_list};
+use crate::mods::{ModInfo, ModList, refresh_mod_list};
 use crate::settings::Settings;
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -21,7 +21,7 @@ pub struct App {
     #[serde(skip)]
     state: State,
     categories: CategoryMatchers,
-    mods: Vec<ModInfo>,
+    mods: ModList,
 }
 
 #[derive(Default, PartialEq)]
@@ -63,7 +63,7 @@ impl Default for App {
             first_time_setup: true,
             state: Default::default(),
             categories: default_matchers(),
-            mods: vec![],
+            mods: Default::default(),
         }
     }
 }
@@ -93,7 +93,7 @@ impl App {
         }
     }
 
-    fn main_page(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn main_page(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         egui::Panel::left("categories_panel")
             .show_separator_line(true)
             .min_size(200.0)
@@ -144,14 +144,15 @@ impl App {
                     }
                 });
             });
+
             if let Some(Ok(modlist)) = self.state.mods_refresh_list.read() {
-                self.mods = modlist.to_vec();
+                self.mods = ModList::new(modlist.to_vec());
                 self.state.mods_refresh_list.clear();
             }
         });
     }
 
-    fn settings_page(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn settings_page(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let game_folder = self.settings.game_folder().to_path_buf();
         let input_folder = self.settings.input_folder().to_path_buf();
         let mut api_key = self.settings.nexusmods_api_key().to_string();
@@ -269,7 +270,7 @@ impl App {
         });
     }
 
-    fn categories_page(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn categories_page(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show_inside(ui, |ui| {
             ui.with_layout(egui::Layout::top_down_justified(egui::Align::Center), |ui| {
                 ui.set_max_width(800.0);
@@ -463,7 +464,7 @@ impl eframe::App for App {
         ctx.request_repaint_after_for(Duration::from_secs(1), ctx.viewport_id());
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
         self.state.toasts =
             Toasts::new().anchor(Align2::RIGHT_TOP, (-15.0, 15.0)).direction(Direction::TopDown);
         egui::Panel::top("top_panel").show_inside(ui, |ui| {

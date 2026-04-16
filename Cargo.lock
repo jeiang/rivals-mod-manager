@@ -1078,17 +1078,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "egui_table"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8512decdd471a2b6106d0b42cc0662f0e94b0ca8f21bc1b0075f455f58901010"
-dependencies = [
- "egui",
- "serde",
- "vec1",
-]
-
-[[package]]
 name = "emath"
 version = "0.34.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3162,7 +3151,6 @@ dependencies = [
  "egui-toast",
  "egui_extras",
  "egui_material_icons",
- "egui_table",
  "env_logger",
  "futures-util",
  "lazy-regex",
@@ -3170,7 +3158,6 @@ dependencies = [
  "regex",
  "rfd",
  "serde",
- "serde_regex",
  "tokio",
  "walkdir",
 ]
@@ -3335,16 +3322,6 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
-]
-
-[[package]]
-name = "serde_regex"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a8136f1a4ea815d7eac4101cfd0b16dc0cb5e1fe1b8609dfd728058656b7badf"
-dependencies = [
- "regex",
- "serde",
 ]
 
 [[package]]
@@ -3864,12 +3841,6 @@ dependencies = [
  "serde_core",
  "wasm-bindgen",
 ]
-
-[[package]]
-name = "vec1"
-version = "1.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eab68b56840f69efb0fefbe3ab6661499217ffdc58e2eef7c3f6f69835386322"
 
 [[package]]
 name = "vello_common"
