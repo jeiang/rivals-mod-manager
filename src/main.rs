@@ -16,7 +16,7 @@ async fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "rivals-mod-manager",
+        "Rivals Mod Manager",
         native_options,
         Box::new(|cc| Ok(Box::new(rivals_mod_manager::App::new(cc)))),
     )

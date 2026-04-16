@@ -17,6 +17,7 @@ chrono = "0.4.44"
 eframe = { version = "0.34.1", features = ["persistence"] }
 egui = "0.34.1"
 egui-async = "0.4.1"
+egui-toast = "0.20.0"
 egui_extras = "0.34.1"
 egui_material_icons = { version = "0.6.0", features = ["compressed", "outline"] }
 egui_table = "0.8.0"
