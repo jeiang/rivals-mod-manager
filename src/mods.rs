@@ -51,6 +51,8 @@ pub struct ModInfo {
     last_modified: String,
     enabled: bool,
     files: Vec<ModFileInfo>,
+    #[serde(default)]
+    edited_fields: ModEditedFields,
 }
 
 impl ModInfo {
@@ -62,12 +64,22 @@ impl ModInfo {
         self.name = name;
     }
 
+    pub fn edit_name(&mut self, name: String) {
+        self.name = name;
+        self.edited_fields.name = true;
+    }
+
     pub fn author(&self) -> &str {
         &self.author
     }
 
     pub fn set_author(&mut self, author: String) {
         self.author = author;
+    }
+
+    pub fn edit_author(&mut self, author: String) {
+        self.author = author;
+        self.edited_fields.author = true;
     }
 
     pub fn mod_id(&self) -> Option<u32> {
@@ -78,12 +90,22 @@ impl ModInfo {
         self.mod_id = mod_id;
     }
 
+    pub fn edit_mod_id(&mut self, mod_id: Option<u32>) {
+        self.mod_id = mod_id;
+        self.edited_fields.mod_id = true;
+    }
+
     pub fn category(&self) -> &str {
         &self.category
     }
 
     pub fn set_category(&mut self, category: String) {
         self.category = category;
+    }
+
+    pub fn edit_category(&mut self, category: String) {
+        self.category = category;
+        self.edited_fields.category = true;
     }
 
     pub fn last_modified(&self) -> &str {
@@ -115,7 +137,56 @@ impl ModInfo {
         if let Ok(last_modified) = get_last_modified(&self.path) {
             self.last_modified = last_modified;
         }
+        self.edited_fields = ModEditedFields::default();
     }
+
+    fn apply_previous_state(&mut self, previous: &Self) {
+        if previous.edited_fields.name {
+            self.name = previous.name.clone();
+        }
+        if previous.edited_fields.author {
+            self.author = previous.author.clone();
+        }
+        if previous.edited_fields.mod_id {
+            self.mod_id = previous.mod_id;
+        }
+        if previous.edited_fields.category {
+            self.category = previous.category.clone();
+        }
+
+        self.enabled = previous.enabled;
+        self.edited_fields = previous.edited_fields.clone();
+
+        for file_info in &mut self.files {
+            if let Some(previous_file_info) = previous
+                .files
+                .iter()
+                .find(|previous_file_info| previous_file_info.subpath == file_info.subpath)
+            {
+                file_info.enabled = previous_file_info.enabled;
+            }
+        }
+    }
+
+    fn name_is_edited(&self) -> bool {
+        self.edited_fields.name
+    }
+
+    fn author_is_edited(&self) -> bool {
+        self.edited_fields.author
+    }
+
+    fn category_is_edited(&self) -> bool {
+        self.edited_fields.category
+    }
+}
+
+#[derive(Default, Debug, serde::Deserialize, serde::Serialize, Clone)]
+struct ModEditedFields {
+    name: bool,
+    author: bool,
+    mod_id: bool,
+    category: bool,
 }
 
 #[derive(Default, Debug, serde::Deserialize, serde::Serialize, Clone)]
@@ -188,6 +259,7 @@ pub async fn refresh_mod_list(
             last_modified,
             enabled: true,
             files,
+            edited_fields: Default::default(),
         };
         list.push(modinfo);
     }
@@ -199,12 +271,23 @@ pub async fn refresh_mods_with_nexusmods(
     matchers: CategoryMatchers,
     api_key: String,
     mut nexusmods_mod_cache: HashMap<u32, CachedModInfo>,
+    previous_mods: Vec<ModInfo>,
 ) -> Result<ModsRefreshResult, String> {
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     let mut mods =
         refresh_mod_list(&input_folder, &matchers).await.map_err(|err| err.to_string())?;
     let mut toast_errors = vec![];
+    let previous_mods_by_path = previous_mods
+        .iter()
+        .map(|mod_info| (mod_info.path.clone(), mod_info))
+        .collect::<HashMap<_, _>>();
+
+    for mod_info in &mut mods {
+        if let Some(previous_mod_info) = previous_mods_by_path.get(&mod_info.path) {
+            mod_info.apply_previous_state(previous_mod_info);
+        }
+    }
 
     let api_key = api_key.trim();
     if api_key.is_empty() {
@@ -248,9 +331,13 @@ pub async fn refresh_mods_with_nexusmods(
         }
 
         if let Some(fetched_mod_info) = nexusmods_mod_cache.get(&mod_id) {
-            mod_info.set_name(fetched_mod_info.name().to_string());
-            mod_info.set_author(fetched_mod_info.author().to_string());
-            if mod_info.category() == "Uncategorized" {
+            if !mod_info.name_is_edited() {
+                mod_info.set_name(fetched_mod_info.name().to_string());
+            }
+            if !mod_info.author_is_edited() {
+                mod_info.set_author(fetched_mod_info.author().to_string());
+            }
+            if !mod_info.category_is_edited() && mod_info.category() == "Uncategorized" {
                 mod_info.set_category(match_category(&matchers, fetched_mod_info.name()));
             }
         }

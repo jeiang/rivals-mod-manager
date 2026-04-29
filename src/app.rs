@@ -75,6 +75,13 @@ pub enum SortDirection {
     Descending,
 }
 
+enum ModKeyboardAction {
+    MoveSelection { delta: isize },
+    ExtendSelection { delta: isize },
+    MoveCursor { delta: isize },
+    ToggleCursorSelection,
+}
+
 pub struct State {
     toasts: Toasts,
     settings_game_folder: Bind<PathBuf, ()>,
@@ -90,6 +97,8 @@ pub struct State {
     mods_sort_direction: SortDirection,
     mods_selected_indices: BTreeSet<usize>,
     mods_selection_anchor: Option<usize>,
+    mods_keyboard_cursor: Option<usize>,
+    mods_scroll_to_index: Option<usize>,
     mods_expanded_indices: BTreeSet<usize>,
     mods_edit_modal: Option<ModEditModal>,
     misc_needs_save: bool,
@@ -112,6 +121,8 @@ impl Default for State {
             mods_sort_direction: SortDirection::Ascending,
             mods_selected_indices: Default::default(),
             mods_selection_anchor: Default::default(),
+            mods_keyboard_cursor: Default::default(),
+            mods_scroll_to_index: Default::default(),
             mods_expanded_indices: Default::default(),
             mods_edit_modal: Default::default(),
             misc_needs_save: Default::default(),
@@ -262,6 +273,7 @@ struct ModsTableDelegate<'a> {
     needs_save: &'a mut bool,
     selected_mod_indices: &'a mut BTreeSet<usize>,
     selection_anchor: &'a mut Option<usize>,
+    keyboard_cursor: &'a mut Option<usize>,
     expanded_mod_indices: &'a mut BTreeSet<usize>,
     sort_column: &'a mut Option<ModSortColumn>,
     sort_direction: &'a mut SortDirection,
@@ -346,15 +358,18 @@ impl ModsTableDelegate<'_> {
                         self.selected_mod_indices.insert(mod_index);
                         *self.selection_anchor = Some(mod_index);
                     }
+                    *self.keyboard_cursor = Some(mod_index);
                 } else if toggle_selection {
                     if !self.selected_mod_indices.remove(&mod_index) {
                         self.selected_mod_indices.insert(mod_index);
                     }
                     *self.selection_anchor = Some(mod_index);
+                    *self.keyboard_cursor = Some(mod_index);
                 } else {
                     self.selected_mod_indices.clear();
                     self.selected_mod_indices.insert(mod_index);
                     *self.selection_anchor = Some(mod_index);
+                    *self.keyboard_cursor = Some(mod_index);
                 }
             }
         }
@@ -368,6 +383,7 @@ impl ModsTableDelegate<'_> {
                 self.selected_mod_indices.insert(mod_index);
                 *self.selection_anchor = Some(mod_index);
             }
+            *self.keyboard_cursor = Some(mod_index);
         }
 
         true
@@ -668,6 +684,9 @@ impl TableDelegate for ModsTableDelegate<'_> {
             ModTableRowKind::Summary if self.selected_mod_indices.contains(&row.mod_index) => {
                 ui.visuals().selection.bg_fill
             }
+            ModTableRowKind::Summary if *self.keyboard_cursor == Some(row.mod_index) => {
+                ui.visuals().widgets.hovered.bg_fill
+            }
             ModTableRowKind::Summary if row_nr % 2 == 0 => ui.visuals().extreme_bg_color,
             ModTableRowKind::File { .. } => ui.visuals().faint_bg_color,
             ModTableRowKind::Summary => Color32::TRANSPARENT,
@@ -773,12 +792,14 @@ impl App {
                         let matchers = self.categories.clone();
                         let api_key = self.settings.nexusmods_api_key().to_string();
                         let nexusmods_mod_cache = self.nexusmods_mod_cache.clone();
+                        let previous_mods = self.mods.mods().to_vec();
                         self.state.mods_refresh_list.request(async move {
                             refresh_mods_with_nexusmods(
                                 input_folder,
                                 matchers,
                                 api_key,
                                 nexusmods_mod_cache,
+                                previous_mods,
                             )
                             .await
                         });
@@ -844,7 +865,7 @@ impl App {
                     ui.add(TextEdit::singleline(name).desired_width(ui.available_width()));
                     self.render_mod_edit_actions(ui, &mut keep_open, |app| {
                         if let Some(mod_info) = app.mods.mods_mut().get_mut(*mod_index) {
-                            mod_info.set_name(name.trim().to_string());
+                            mod_info.edit_name(name.trim().to_string());
                             app.state.misc_needs_save = true;
                         }
                         true
@@ -871,7 +892,7 @@ impl App {
                     self.render_mod_edit_actions(ui, &mut keep_open, |app| {
                         for mod_index in mod_indices.iter().copied() {
                             if let Some(mod_info) = app.mods.mods_mut().get_mut(mod_index) {
-                                mod_info.set_author(author.trim().to_string());
+                                mod_info.edit_author(author.trim().to_string());
                                 app.state.misc_needs_save = true;
                             }
                         }
@@ -896,7 +917,7 @@ impl App {
                         };
 
                         if let Some(mod_info) = app.mods.mods_mut().get_mut(*mod_index) {
-                            mod_info.set_mod_id(parsed_mod_id);
+                            mod_info.edit_mod_id(parsed_mod_id);
                             app.state.misc_needs_save = true;
                         }
                         true
@@ -927,7 +948,7 @@ impl App {
                     self.render_mod_edit_actions(ui, &mut keep_open, |app| {
                         for mod_index in mod_indices.iter().copied() {
                             if let Some(mod_info) = app.mods.mods_mut().get_mut(mod_index) {
-                                mod_info.set_category(category.clone());
+                                mod_info.edit_category(category.clone());
                                 app.state.misc_needs_save = true;
                             }
                         }
@@ -980,6 +1001,172 @@ impl App {
         authors
     }
 
+    fn handle_mods_table_keyboard_input(&mut self, ui: &Ui, visible_mod_indices: &[usize]) {
+        if self
+            .state
+            .mods_keyboard_cursor
+            .is_some_and(|cursor| !visible_mod_indices.contains(&cursor))
+        {
+            self.state.mods_keyboard_cursor = None;
+        }
+
+        if self.state.mods_edit_modal.is_some() || ui.ctx().text_edit_focused() {
+            return;
+        }
+
+        if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            self.state.mods_selected_indices.clear();
+            self.state.mods_selection_anchor = None;
+            self.state.mods_keyboard_cursor = None;
+            return;
+        }
+
+        if visible_mod_indices.is_empty() {
+            return;
+        }
+
+        let action = ui.input_mut(|input| {
+            let modifiers = input.modifiers;
+            let extend = modifiers.shift && !modifiers.ctrl && !modifiers.command;
+            let move_cursor_only = !modifiers.shift && (modifiers.ctrl || modifiers.command);
+            let plain_move = !modifiers.shift && !modifiers.ctrl && !modifiers.command;
+
+            if move_cursor_only {
+                if input.consume_key(egui::Modifiers::CTRL, egui::Key::ArrowUp)
+                    || input.consume_key(egui::Modifiers::COMMAND, egui::Key::ArrowUp)
+                {
+                    return Some(ModKeyboardAction::MoveCursor { delta: -1 });
+                }
+                if input.consume_key(egui::Modifiers::CTRL, egui::Key::ArrowDown)
+                    || input.consume_key(egui::Modifiers::COMMAND, egui::Key::ArrowDown)
+                {
+                    return Some(ModKeyboardAction::MoveCursor { delta: 1 });
+                }
+            }
+
+            if extend {
+                if input.consume_key(egui::Modifiers::SHIFT, egui::Key::ArrowUp) {
+                    return Some(ModKeyboardAction::ExtendSelection { delta: -1 });
+                }
+                if input.consume_key(egui::Modifiers::SHIFT, egui::Key::ArrowDown) {
+                    return Some(ModKeyboardAction::ExtendSelection { delta: 1 });
+                }
+            }
+
+            if plain_move {
+                if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
+                    return Some(ModKeyboardAction::MoveSelection { delta: -1 });
+                }
+                if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
+                    return Some(ModKeyboardAction::MoveSelection { delta: 1 });
+                }
+                if input.consume_key(egui::Modifiers::NONE, egui::Key::Enter) {
+                    return Some(ModKeyboardAction::ToggleCursorSelection);
+                }
+            }
+
+            None
+        });
+
+        let Some(action) = action else {
+            return;
+        };
+
+        match action {
+            ModKeyboardAction::MoveSelection { delta } => {
+                let Some(target) = self.mod_keyboard_target(visible_mod_indices, delta) else {
+                    return;
+                };
+                self.state.mods_selected_indices.clear();
+                self.state.mods_selected_indices.insert(target);
+                self.state.mods_selection_anchor = Some(target);
+                self.state.mods_keyboard_cursor = Some(target);
+                self.state.mods_scroll_to_index = Some(target);
+            }
+            ModKeyboardAction::ExtendSelection { delta } => {
+                let Some(target) = self.mod_keyboard_target(visible_mod_indices, delta) else {
+                    return;
+                };
+                let anchor = self
+                    .state
+                    .mods_selection_anchor
+                    .filter(|anchor| visible_mod_indices.contains(anchor))
+                    .or(self.state.mods_keyboard_cursor)
+                    .unwrap_or(target);
+                self.state.mods_selected_indices.clear();
+                self.state.mods_selected_indices.extend(
+                    Self::mod_index_range(visible_mod_indices, anchor, target)
+                        .unwrap_or_else(|| vec![target]),
+                );
+                self.state.mods_selection_anchor = Some(anchor);
+                self.state.mods_keyboard_cursor = Some(target);
+                self.state.mods_scroll_to_index = Some(target);
+            }
+            ModKeyboardAction::MoveCursor { delta } => {
+                if let Some(target) = self.mod_keyboard_target(visible_mod_indices, delta) {
+                    self.state.mods_keyboard_cursor = Some(target);
+                    self.state.mods_scroll_to_index = Some(target);
+                }
+            }
+            ModKeyboardAction::ToggleCursorSelection => {
+                let target = self
+                    .state
+                    .mods_keyboard_cursor
+                    .filter(|cursor| visible_mod_indices.contains(cursor))
+                    .unwrap_or(visible_mod_indices[0]);
+                if !self.state.mods_selected_indices.remove(&target) {
+                    self.state.mods_selected_indices.insert(target);
+                }
+                self.state.mods_selection_anchor = Some(target);
+                self.state.mods_keyboard_cursor = Some(target);
+                self.state.mods_scroll_to_index = Some(target);
+            }
+        }
+    }
+
+    fn mod_keyboard_target(&self, visible_mod_indices: &[usize], delta: isize) -> Option<usize> {
+        if visible_mod_indices.is_empty() {
+            return None;
+        }
+
+        let current_position = self
+            .state
+            .mods_keyboard_cursor
+            .and_then(|cursor| visible_mod_indices.iter().position(|index| *index == cursor))
+            .or_else(|| {
+                self.state.mods_selection_anchor.and_then(|anchor| {
+                    visible_mod_indices.iter().position(|index| *index == anchor)
+                })
+            })
+            .or_else(|| {
+                visible_mod_indices
+                    .iter()
+                    .position(|index| self.state.mods_selected_indices.contains(index))
+            });
+
+        let target_position = match (current_position, delta) {
+            (Some(position), -1) => position.saturating_sub(1),
+            (Some(position), 1) => (position + 1).min(visible_mod_indices.len() - 1),
+            (Some(position), _) => position,
+            (None, -1) => visible_mod_indices.len() - 1,
+            (None, _) => 0,
+        };
+
+        visible_mod_indices.get(target_position).copied()
+    }
+
+    fn mod_index_range(
+        visible_mod_indices: &[usize],
+        start_mod_index: usize,
+        end_mod_index: usize,
+    ) -> Option<Vec<usize>> {
+        let start = visible_mod_indices.iter().position(|index| *index == start_mod_index)?;
+        let end = visible_mod_indices.iter().position(|index| *index == end_mod_index)?;
+        let (from, to) = if start <= end { (start, end) } else { (end, start) };
+
+        Some(visible_mod_indices[from..=to].to_vec())
+    }
+
     fn render_mods_table(&mut self, ui: &mut Ui) {
         let mods_count = self.mods.mods().len();
         self.state.mods_selected_indices.retain(|index| *index < mods_count);
@@ -1012,10 +1199,16 @@ impl App {
                     let a = &mods[*a];
                     let b = &mods[*b];
                     let cmp = match sort_col {
-                        ModSortColumn::Name => a.name().cmp(b.name()),
-                        ModSortColumn::Author => a.author().cmp(b.author()),
+                        ModSortColumn::Name => {
+                            a.name().to_lowercase().cmp(&b.name().to_lowercase())
+                        }
+                        ModSortColumn::Author => {
+                            a.author().to_lowercase().cmp(&b.author().to_lowercase())
+                        }
                         ModSortColumn::ModId => a.mod_id().cmp(&b.mod_id()),
-                        ModSortColumn::Category => a.category().cmp(b.category()),
+                        ModSortColumn::Category => {
+                            a.category().to_lowercase().cmp(&b.category().to_lowercase())
+                        }
                         ModSortColumn::LastModified => a.last_modified().cmp(b.last_modified()),
                     };
 
@@ -1044,6 +1237,17 @@ impl App {
             - f32::from(MODS_TABLE_CELL_MARGIN_X) * 2.0;
         let row_tops = self.mods_table_row_tops(ui, &rows, name_width.max(1.0));
         let row_count = u64::try_from(rows.len()).unwrap_or(u64::MAX);
+        let visible_mod_indices = rows
+            .iter()
+            .filter(|row| row.kind == ModTableRowKind::Summary)
+            .map(|row| row.mod_index)
+            .collect::<Vec<_>>();
+        self.handle_mods_table_keyboard_input(ui, &visible_mod_indices);
+        let scroll_to_row = self.state.mods_scroll_to_index.take().and_then(|mod_index| {
+            rows.iter()
+                .position(|row| row.mod_index == mod_index && row.kind == ModTableRowKind::Summary)
+                .and_then(|row_index| u64::try_from(row_index).ok())
+        });
 
         let mut delegate = ModsTableDelegate {
             mods: self.mods.mods_mut(),
@@ -1056,18 +1260,22 @@ impl App {
             needs_save: &mut self.state.misc_needs_save,
             selected_mod_indices: &mut self.state.mods_selected_indices,
             selection_anchor: &mut self.state.mods_selection_anchor,
+            keyboard_cursor: &mut self.state.mods_keyboard_cursor,
             expanded_mod_indices: &mut self.state.mods_expanded_indices,
             sort_column: &mut self.state.mods_sort_column,
             sort_direction: &mut self.state.mods_sort_direction,
         };
 
-        Table::new()
+        let mut table = Table::new()
             .id_salt(MODS_TABLE_ID)
             .columns(columns)
             .headers([HeaderRow::new(MODS_TABLE_HEADER_HEIGHT)])
             .auto_size_mode(AutoSizeMode::Always)
-            .num_rows(row_count)
-            .show(ui, &mut delegate);
+            .num_rows(row_count);
+        if let Some(row_nr) = scroll_to_row {
+            table = table.scroll_to_row(row_nr, None);
+        }
+        table.show(ui, &mut delegate);
     }
 
     fn mods_table_columns(&self, ui: &Ui) -> Vec<Column> {
