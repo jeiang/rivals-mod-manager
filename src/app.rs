@@ -34,7 +34,14 @@ use egui_toast::{Toast, ToastOptions, Toasts};
 use regex::Regex;
 
 use crate::categories::{CategoryMatcher, CategoryMatchers, default_matchers};
-use crate::mods::{ModInfo, ModList, ModsRefreshResult, refresh_mods_with_nexusmods};
+use crate::mods::{
+    ModInfo,
+    ModList,
+    ModsRefreshResult,
+    apply_mods,
+    clear_mods,
+    refresh_mods_with_nexusmods,
+};
 use crate::nexusmods::CachedModInfo;
 use crate::settings::Settings;
 
@@ -86,6 +93,7 @@ pub struct State {
     toasts: Toasts,
     settings_game_folder: Bind<PathBuf, ()>,
     settings_input_folder: Bind<PathBuf, ()>,
+    first_time_setup_modal_is_open: bool,
     categories_new_category: String,
     categories_modal_is_open: bool,
     categories_modal_idx: usize,
@@ -110,6 +118,7 @@ impl Default for State {
             toasts: Default::default(),
             settings_game_folder: Default::default(),
             settings_input_folder: Default::default(),
+            first_time_setup_modal_is_open: true,
             categories_new_category: Default::default(),
             categories_modal_is_open: Default::default(),
             categories_modal_idx: Default::default(),
@@ -782,10 +791,20 @@ impl App {
                 ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
                     let is_refreshing = self.state.mods_refresh_list.is_pending();
                     if ui.add_enabled(!is_refreshing, egui::Button::new("Apply Mods")).clicked() {
-                        // TODO:
+                        match apply_mods(self.settings.game_folder(), self.mods.mods()) {
+                            Ok(()) => self.add_success_toast("Mods applied successfully."),
+                            Err(err) => {
+                                self.add_error_toast(format!("Failed to apply mods: {err}"));
+                            }
+                        }
                     }
                     if ui.add_enabled(!is_refreshing, egui::Button::new("Clear Mods")).clicked() {
-                        // TODO:
+                        match clear_mods(self.settings.game_folder()) {
+                            Ok(()) => self.add_success_toast("Mods cleared successfully."),
+                            Err(err) => {
+                                self.add_error_toast(format!("Failed to clear mods: {err}"));
+                            }
+                        }
                     }
                     if ui.add_enabled(!is_refreshing, egui::Button::new("Refresh Mods")).clicked() {
                         let input_folder = self.settings.input_folder().clone();
@@ -841,9 +860,63 @@ impl App {
         });
     }
 
+    fn render_first_time_setup_modal(&mut self, ui: &mut Ui) {
+        if !self.first_time_setup || !self.state.first_time_setup_modal_is_open {
+            return;
+        }
+
+        let modal = Modal::new(Id::new("First Time Setup Modal")).show(ui.ctx(), |ui| {
+            ui.set_width(520.0);
+            ui.heading("First Setup");
+            ui.label("Configure the folders on this Settings page before managing mods.");
+            ui.separator();
+
+            ui.label("What to configure");
+            ui.label("Game Folder: the Marvel Rivals install folder.");
+            ui.label("Input Folder: the folder where you keep downloaded mod folders.");
+            ui.label("NexusMods API Key: optional, used to fetch mod names and authors from NexusMods.");
+            ui.separator();
+
+            ui.label("How to use mods");
+            ui.label("Put each mod in its own folder inside the input folder, then click Refresh Mods.");
+            ui.label("Enable the mod files you want, then click Apply Mods to symlink them into the game's ~mods folder.");
+            ui.label("Click Clear Mods to remove the applied links from the game's ~mods folder.");
+            ui.separator();
+
+            ui.label("Folder names");
+            ui.label("Folder names can include metadata in these forms:");
+            ui.monospace("Author - Mod Name - 1234");
+            ui.monospace("Mod Name - 1234");
+            ui.monospace("Author - Mod Name");
+            ui.label("The trailing number is treated as the NexusMods mod id. If the author is missing, it starts as Unknown.");
+
+            ui.horizontal(|ui| {
+                ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Got it").clicked() {
+                        self.state.first_time_setup_modal_is_open = false;
+                        ui.close();
+                    }
+                });
+            });
+        });
+
+        if modal.should_close() {
+            self.state.first_time_setup_modal_is_open = false;
+        }
+    }
+
     fn add_error_toast(&mut self, text: impl Into<String>) {
         self.state.toasts.add(Toast {
             kind: egui_toast::ToastKind::Error,
+            text: text.into().into(),
+            options: ToastOptions::default().show_progress(true).duration_in_seconds(5.0),
+            ..Default::default()
+        });
+    }
+
+    fn add_success_toast(&mut self, text: impl Into<String>) {
+        self.state.toasts.add(Toast {
+            kind: egui_toast::ToastKind::Success,
             text: text.into().into(),
             options: ToastOptions::default().show_progress(true).duration_in_seconds(5.0),
             ..Default::default()
@@ -1687,6 +1760,7 @@ impl eframe::App for App {
 
         if self.first_time_setup {
             self.settings_page(ui, frame);
+            self.render_first_time_setup_modal(ui);
             if self.current_page != Page::Settings {
                 self.state.toasts.add(Toast {
                     kind: egui_toast::ToastKind::Error,

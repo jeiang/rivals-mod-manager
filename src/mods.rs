@@ -11,6 +11,8 @@ use lazy_regex::regex_captures;
 use crate::categories::{CategoryMatcher, CategoryMatchers, match_category};
 use crate::nexusmods::{CachedModInfo, fetch_mod_info};
 
+const GAME_MODS_SUBPATH: [&str; 5] = ["MarvelGame", "Marvel", "Content", "Paks", "~mods"];
+
 #[derive(Clone)]
 pub struct ModsRefreshResult {
     pub mods: Vec<ModInfo>,
@@ -346,7 +348,58 @@ pub async fn refresh_mods_with_nexusmods(
     Ok(ModsRefreshResult { mods, nexusmods_mod_cache, toast_errors })
 }
 
-// pub fn merge_and_sort_mods(prev: Vec<ModInfo>, next: Vec<ModInfo>) {}
+pub fn apply_mods(game_folder: &Path, mods: &[ModInfo]) -> io::Result<()> {
+    clear_mods(game_folder)?;
+
+    for mod_info in mods {
+        for file_info in mod_info.files().iter().filter(|file_info| file_info.enabled()) {
+            let source = mod_info.path.join(file_info.subpath());
+            let destination = game_mods_folder(game_folder).join(file_info.subpath());
+
+            if let Some(parent) = destination.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+
+            symlink_file(&source, &destination)?;
+        }
+    }
+
+    Ok(())
+}
+
+pub fn clear_mods(game_folder: &Path) -> io::Result<()> {
+    let mods_folder = game_mods_folder(game_folder);
+    if !mods_folder.exists() {
+        std::fs::create_dir_all(&mods_folder)?;
+        return Ok(());
+    }
+
+    for entry in std::fs::read_dir(&mods_folder)? {
+        let path = entry?.path();
+        let file_type = std::fs::symlink_metadata(&path)?.file_type();
+        if file_type.is_dir() && !file_type.is_symlink() {
+            std::fs::remove_dir_all(path)?;
+        } else {
+            std::fs::remove_file(path)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn game_mods_folder(game_folder: &Path) -> PathBuf {
+    GAME_MODS_SUBPATH.iter().fold(game_folder.to_path_buf(), |path, component| path.join(component))
+}
+
+#[cfg(unix)]
+fn symlink_file(source: &Path, destination: &Path) -> io::Result<()> {
+    std::os::unix::fs::symlink(source, destination)
+}
+
+#[cfg(windows)]
+fn symlink_file(source: &Path, destination: &Path) -> io::Result<()> {
+    std::os::windows::fs::symlink_file(source, destination)
+}
 
 struct NameParseResult {
     name: String,
