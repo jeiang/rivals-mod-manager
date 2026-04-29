@@ -1,61 +1,83 @@
-name: release
+name: Build Release
 
 on:
-  workflow_dispatch:
   push:
     tags:
-      - "release-*"
+      - "*"
+
+permissions:
+  contents: write
 
 jobs:
-  publish-tauri:
-    permissions:
-      contents: write
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - platform: "macos-latest" # for Arm based macs (M1 and above).
-            args: "--target aarch64-apple-darwin"
-          - platform: "macos-latest" # for Intel based macs.
-            args: "--target x86_64-apple-darwin"
-          - platform: "ubuntu-22.04"
-            args: ""
-          - platform: "windows-latest"
-            args: ""
+          - name: linux-x86_64
+            os: ubuntu-latest
+            archive: rivals-mod-manager-linux-x86_64.tar.gz
+            executable: rivals-mod-manager
+          - name: windows-x86_64
+            os: windows-latest
+            archive: rivals-mod-manager-windows-x86_64.zip
+            executable: rivals-mod-manager.exe
+          - name: macos-x86_64
+            os: macos-13
+            archive: rivals-mod-manager-macos-x86_64.tar.gz
+            executable: rivals-mod-manager
 
-    runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: setup bun
-        uses: oven-sh/setup-bun@v2
-
-      - name: install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          # Those targets are only used on macos runners so it's in an `if` to slightly speed up windows and linux builds.
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
-
-      - name: install dependencies (ubuntu only)
-        if: matrix.platform == 'ubuntu-22.04' # This must match the platform value defined above.
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y libgtk-3-dev libxkbcommon-dev pkg-config
 
-      - name: install frontend dependencies
-        run: bun install # change this to npm, pnpm or bun depending on which one you use.
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: generate icons
-        run: bun tauri icon # change this to npm, pnpm or bun depending on which one you use.
+      - name: Build
+        run: cargo build --release --locked
 
-      - uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Package Unix
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          cp "target/release/${{ matrix.executable }}" "dist/${{ matrix.executable }}"
+          tar -czf "${{ matrix.archive }}" -C dist "${{ matrix.executable }}"
+
+      - name: Package Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          Copy-Item "target/release/${{ matrix.executable }}" "dist/${{ matrix.executable }}"
+          Compress-Archive -Path "dist/${{ matrix.executable }}" -DestinationPath "${{ matrix.archive }}"
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
         with:
-          tagName: app-v__VERSION__ # the action automatically replaces \_\_VERSION\_\_ with the app version.
-          releaseName: "Rivals Mod Manager v__VERSION__"
-          releaseBody: "See the assets to download this version and install."
-          releaseDraft: true
-          prerelease: false
-          tauriScript: bun run tauri
-          args: ${{ matrix.args }}
+          name: ${{ matrix.name }}
+          path: ${{ matrix.archive }}
+
+  release:
+    name: Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*

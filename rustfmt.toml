@@ -1,0 +1,48 @@
+########################################
+# General Formatting
+########################################
+
+style_edition = "2024"          # Use Rust 2024 edition styling rules
+unstable_features = true        # Enable nightly-only unstable features
+max_width = 100                  # Maximum width of each line
+hard_tabs = false               # Use spaces instead of tabs
+tab_spaces = 4                  # Number of spaces per indentation level
+newline_style = "Unix"          # Use LF for line endings
+reorder_impl_items = true       # Reorder items inside impl blocks
+use_field_init_shorthand = true # Use shorthand for struct field init (e.g., `Foo { x }` instead of `Foo { x: x }`)
+
+########################################
+# Imports Configuration
+########################################
+
+group_imports = "StdExternalCrate"    # Group imports into std / external / crate-local
+imports_granularity = "Module"        # Group imports per module path
+reorder_imports = true                # Reorder imports alphabetically within groups
+imports_layout = "HorizontalVertical" # Lay out grouped imports horizontally or vertically based on length
+condense_wildcard_suffixes = true     # Merge nested paths with a wildcard where possible (e.g., `foo::{bar, baz}`)
+
+########################################
+# Comment and String Formatting
+########################################
+
+wrap_comments = true      # Wrap doc and regular comments
+comment_width = 80        # Maximum width for comments
+normalize_comments = true # Convert block comments to line comments if clearer
+format_strings = false    # Reformat string literals where safe
+
+########################################
+# Whitespace and Layout
+########################################
+
+blank_lines_upper_bound = 1      # No more than 1 consecutive blank line
+blank_lines_lower_bound = 0      # Allow zero blank lines between items if appropriate
+struct_field_align_threshold = 0 # Disable field alignment (0 means never align)
+trailing_comma = "Vertical"      # Add trailing commas in multi-line lists
+
+########################################
+# Stylistic Preferences
+########################################
+
+use_small_heuristics = "Max" # Apply formatting heuristics even to long items
+merge_derives = true         # Merge multiple `#[derive(...)]` into one
+hex_literal_case = "Upper"   # Use uppercase for hex digits in literals

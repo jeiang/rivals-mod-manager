@@ -1,132 +1,160 @@
-# Copilot Instructions for Rivals Mod Manager
+# Copilot Instructions for rivals-mod-manager
 
-## Quick Start
+## Project Overview
 
-**Install & Run:**
+**rivals-mod-manager** is a desktop GUI application built in Rust for organizing and managing mods for the game "Marvel Rivals". The application categorizes mods using regex pattern matching and displays them in an egui-based UI.
+
+### Architecture
+
+**Key modules:**
+
+- **`app.rs`**: Main UI application using `eframe` (egui framework). Manages state, rendering pages (Mods, Categories, Settings), and persistence via serde.
+- **`mods.rs`**: Handles filesystem scanning of mod directories using async `WalkDir`. Identifies `.pak` files, extracts mod metadata (ID, name, author), and stores in `ModList`.
+- **`categories.rs`**: Manages regex-based category matching. Includes 40+ hardcoded character matchers (e.g., "Iron Man" matches "iron man", "tony", "stark").
+- **`settings.rs`**: Stores user configuration (game folder path, input folder path, NexusMods API key).
+
+**Technology Stack:**
+- **egui**: Immediate-mode GUI framework for cross-platform desktop UI
+- **tokio**: Async runtime (full features enabled)
+- **regex/lazy-regex**: Pattern matching for mod categorization
+- **serde**: Serialization for app state persistence
+- **eframe**: Wrapper for egui window management
+
+## Build and Test Commands
+
+### Build
 ```bash
-bun install           # Install Node dependencies
-bun run tauri dev     # Start dev server (Vite + Tauri with hot reload)
-bun run tauri build   # Build production bundle
+# Debug build
+cargo build
+
+# Release build (optimized for size and speed)
+cargo build --release
 ```
 
-**Single Lint/Format:**
+### Run
 ```bash
-oxlint src/           # Lint TypeScript/JSX only (fast)
-oxlint --fix src/     # Auto-fix linting issues
-oxfmt src/            # Format TypeScript/JSX
+# Run the application
+cargo run
+
+# Run with debug logging
+RUST_LOG=debug cargo run
 ```
 
-Linting uses **oxlint** (Rust-based, much faster than ESLint), configured in `.oxlintrc.json` with basic rules (`no-unused-vars`, `no-missing-imports`).
+### Testing
+```bash
+# Run all tests (currently empty test suite)
+cargo test
 
-## Architecture
+# Run tests with output displayed
+cargo test -- --nocapture
 
-**Tech Stack:**
-- **Frontend:** SolidJS 1.9.3 + TypeScript + Vite, styled with Tailwind CSS 4.2
-- **Backend:** Tauri v2 (Rust) + SQLite (bundled via rusqlite)
-- **CLI:** Bun (package manager/runtime)
-
-**High-Level Flow:**
-1. **Frontend** (`src/`) runs in Vite dev server (port 1420) and compiles to `dist/` for production
-2. **Tauri** wraps the compiled frontend in a native desktop app (Windows/macOS/Linux)
-3. **Rust backend** (`src-tauri/src/`) exposes commands invoked from frontend via IPC
-4. **Data** stored in local SQLite database (initialized at `src-tauri/data.db`)
-
-**Entry Points:**
-- Frontend: `src/index.tsx` → `src/pages/Main.tsx`, `Settings.tsx`, `Categories.tsx`
-- Backend: `src-tauri/src/lib.rs` (defines Tauri commands & app logic)
-- Tauri config: `src-tauri/tauri.conf.json` (app name, build settings, security)
-
-## Key Conventions
-
-**Frontend (SolidJS/TypeScript):**
-- Page components live in `src/pages/` (routed via `@solidjs/router`)
-- Reusable components in `src/components/`
-- Tailwind CSS only—no CSS files needed (configured in `vite.config.ts`)
-- Call Rust commands via `@tauri-apps/api/core`: `invoke("command_name", args)` (async)
-- No tests configured; linting is your safety net
-
-**Backend (Rust):**
-- Commands are Tauri invocations: `#[tauri::command]` decorated functions in `src/lib.rs`
-- Database uses **rusqlite** directly; queries execute synchronously in `AppState` (Mutex-wrapped `Connection`)
-- Serialization via `serde` for JSON IPC between frontend/backend
-- HTTP calls via **reqwest** (used for API integrations like NexusMods)
-
-**File Structure:**
-```
-src/                              # Frontend (SolidJS)
-├── pages/                        # Page components (Main, Settings, Categories)
-├── components/                   # Reusable components (Button, TopNav, etc.)
-├── assets/                       # Static assets
-├── index.tsx                     # App router & entry point
-└── index.css                     # Global Tailwind imports
-
-src-tauri/                        # Rust backend
-├── src/
-│   ├── lib.rs                    # Tauri command handlers & app logic
-│   └── main.rs                   # Minimal entry point (calls lib.rs)
-├── Cargo.toml                    # Rust dependencies
-├── tauri.conf.json               # Tauri app config (name, icon, security)
-└── data.db                       # SQLite database (created at runtime)
-
-.github/workflows/release.yml     # GitHub Actions for release automation
+# Run a single test
+cargo test test_name --
 ```
 
-## Development Workflow
+### Formatting and Linting
 
-**Hot Reload:**
-- Running `bun run tauri dev` starts both Vite dev server and Tauri in dev mode
-- Changes to `src/` (TypeScript/JSX) hot-reload automatically in the Tauri window
-- Changes to `src-tauri/src/` require restarting `tauri dev`
+```bash
+# Check formatting (doesn't modify files)
+cargo fmt --check
 
-**Adding a New Frontend Page:**
-1. Create `src/pages/NewPage.tsx` as a SolidJS component
-2. Add route in `src/index.tsx`: `<Route path="/newpage" component={NewPage} />`
-3. Link to it from navigation components as needed
+# Format all Rust files
+cargo fmt
 
-**Adding a New Tauri Command:**
-1. Define an async Rust function in `src-tauri/src/lib.rs` with `#[tauri::command]` macro
-2. Invoke from frontend: `invoke("command_name", { arg1, arg2, ... })`
-3. Commands automatically serialize/deserialize JSON between frontend/backend
+# Run clippy (linter)
+cargo clippy
 
-**Database Changes:**
-- SQLite schema defined implicitly when Rust queries execute in `lib.rs`
-- Queries use **rusqlite** params to prevent SQL injection
-- Database persists in `src-tauri/data.db` (gitignored)
+# Run clippy with all warnings treated as errors
+cargo clippy -- -D warnings
 
-## Testing & Verification
+# Fix common clippy issues automatically
+cargo clippy --fix --allow-dirty
+```
 
-No automated tests configured—verify manually:
-- **Frontend:** Test UI interactions in `bun run tauri dev`
-- **Backend:** Test Tauri commands by invoking them from UI or via Tauri CLI testing tools
-- **Linting:** `oxlint` catches basic issues; run before commits
+### Documentation
+```bash
+# Generate and open documentation
+cargo doc --open
+```
 
-## Release & Deployment
+## Key Conventions and Patterns
 
-Push a tag matching `release-*` (e.g., `v0.2.0` → `release-v0.2.0`) to trigger GitHub Actions CI/CD:
-- Workflow: `.github/workflows/release.yml`
-- Builds binaries for Windows, macOS, Linux via `tauri-apps/tauri-action`
-- Publishes release artifacts to GitHub Releases
+### State Management
+- **App-level state** is stored in the `State` struct and persisted via serde to `eframe::Storage` (OS-specific location).
+- The UI is immediate-mode: state is read, UI elements rendered, then mutations applied at the end of the frame.
+- `egui_async::Bind<T, E>` is used for async operations (e.g., `refresh_mod_list`) that resolve over multiple frames.
 
-## Common Tasks
+### Mod Discovery
+- Mods are directories under a configurable folder (set in Settings).
+- Only `.pak` files are recognized as mod files (case-insensitive extension matching).
+- **Async filesystem scanning** uses `async_walkdir::WalkDir` to avoid blocking the UI thread.
+- Mod metadata is extracted from filename parsing using regex (e.g., mod ID and author from filename).
 
-**Update a Tauri command signature:**
-- Edit the Rust function in `src-tauri/src/lib.rs`
-- Update the frontend call in `src/` to match new args
-- The app recompiles on next `tauri dev` restart
+### Category Matching
+- Categories are predefined via `default_matchers()` in `categories.rs` (40+ Marvel character names).
+- Each category has a name and a list of `regex_helper::RegexProxy` patterns for case-insensitive matching.
+- Matches are checked against the mod name; matches determine the category assignment.
+- New categories can be added by editing the hardcoded list or via the UI (stored in settings).
 
-**Modify database schema:**
-- Tauri creates/initializes the SQLite database on startup
-- Alter tables in the `lib.rs` initialization logic or in individual command handlers
-- Schema changes are not versioned; tests must verify schema expectations
+### Error Handling
+- Filesystem errors are surfaced via `io::Error` and displayed as toast notifications.
+- Invalid inputs (e.g., unparseable mod IDs) use `.unwrap()` or `.expect()` in parsing code—these may panic on malformed files.
 
-**Add a new dependency:**
-- JavaScript/TypeScript: `bun add package-name` (updates `package.json` & `bun.lock`)
-- Rust: Edit `src-tauri/Cargo.toml`, then `cargo check` to fetch and verify
+### UI Pages
+- **Mods page**: Displays filtered/searched mod list with enable/disable toggles.
+- **Categories page**: Create/edit regex matchers for categories.
+- **Settings page**: Configure game folder, input folder, and NexusMods API key.
 
-## MCP Servers (Optional)
+## Development Tips
 
-If you've configured MCP servers in your Copilot environment, these are useful for this project:
+### Debugging
+- Use `RUST_LOG=debug` environment variable to enable debug logging via the `log` crate.
+- The app logs to stderr by default (managed by `env_logger`).
 
-- **Filesystem:** Navigate project structure, read files in bulk
-- **Shell:** Run build/test commands (`bun run tauri dev`, `oxlint`, etc.) and inspect output
-- **SQLite:** Inspect the app's SQLite schema directly from `src-tauri/data.db` (useful for understanding data persistence)
+### Workspace Lints
+- All lints are configured in `Cargo.toml` under `[workspace.lints]`.
+- `unsafe_code` is fully denied; unsafe blocks must have `// SAFETY:` comments (enforced by lints).
+- Clippy is very strict (most warnings enabled); fix warnings before committing.
+
+### Dependencies
+- **egui ecosystem** (`eframe`, `egui`, `egui_async`, `egui_extras`, `egui_material_icons`, `egui-toast`): Core UI.
+- **regex/lazy-regex**: Precompiled regex patterns for performance.
+- **async runtime** (tokio): Full feature set enabled for maximum compatibility.
+- **chrono**: Date/time handling (last modified timestamps).
+
+### Nix Development Environment
+- `flake.nix` is configured for development with:
+  - Latest nightly Rust compiler
+  - Targets for Windows MSVC and Linux musl (for cross-compilation)
+  - Dependency caching via `crane`
+  - Security vulnerability scanning via advisory-db
+- Use `nix flake show` to view available dev environments and builds.
+
+### Icon and Assets
+- App icon is included as `src/assets/logo.png` and embedded via `include_bytes!()`.
+- Image must be valid PNG; loading errors will cause the app to fail at startup.
+
+## Common Issues and Solutions
+
+**Issue: Clippy warnings when modifying code**
+- Solution: Run `cargo clippy --fix --allow-dirty` to auto-fix common issues. Review changes carefully.
+
+**Issue: UI doesn't respond when scanning large mod directories**
+- Solution: Already solved in the codebase via async filesystem scanning. Ensure new filesystem operations use `async_walkdir` or similar non-blocking APIs.
+
+**Issue: Mod metadata parsing fails on unusual mod names**
+- Solution: Regex patterns in `mods.rs` may need adjustment. Test regex patterns separately using `regex` crate's online tools before committing.
+
+## File Structure
+
+```
+src/
+├── main.rs             # Entry point, window setup
+├── lib.rs              # Library exports
+├── app.rs              # Main UI application struct
+├── mods.rs             # Mod discovery and metadata extraction
+├── categories.rs       # Character category matchers
+├── settings.rs         # Settings data model
+└── assets/
+    └── logo.png        # App icon (embedded at compile time)
+```
