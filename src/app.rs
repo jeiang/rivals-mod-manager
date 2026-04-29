@@ -21,7 +21,7 @@ use egui::{
     WidgetText,
 };
 use egui_async::Bind;
-use egui_material_icons::icons::ICON_DELETE;
+use egui_material_icons::icons::{ICON_DELETE, ICON_KEYBOARD_ARROW_DOWN, ICON_KEYBOARD_ARROW_UP};
 use egui_table::{AutoSizeMode, CellInfo, Column, HeaderCellInfo, HeaderRow, Table, TableDelegate};
 use egui_toast::{Toast, ToastOptions, Toasts};
 use regex::Regex;
@@ -215,24 +215,41 @@ impl ModsTableDelegate<'_> {
                 return;
             };
 
-            let mut header_text = column.label().to_string();
-            if *self.sort_column == Some(sort_column) {
-                let arrow = match self.sort_direction {
-                    SortDirection::Ascending => " ▲",
-                    SortDirection::Descending => " ▼",
-                };
-                header_text.push_str(arrow);
-            }
+            let response = ui
+                .horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    let mut response =
+                        ui.add(egui::Label::new(column.label()).sense(egui::Sense::click()));
 
-            if ui.button(header_text).clicked() {
-                if *self.sort_column == Some(sort_column) {
-                    *self.sort_direction = match self.sort_direction {
-                        SortDirection::Ascending => SortDirection::Descending,
-                        SortDirection::Descending => SortDirection::Ascending,
-                    };
-                } else {
-                    *self.sort_column = Some(sort_column);
-                    *self.sort_direction = SortDirection::Ascending;
+                    if *self.sort_column == Some(sort_column) {
+                        let icon = match self.sort_direction {
+                            SortDirection::Ascending => ICON_KEYBOARD_ARROW_UP,
+                            SortDirection::Descending => ICON_KEYBOARD_ARROW_DOWN,
+                        };
+                        response |= ui
+                            .with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.add(egui::Label::new(icon).sense(egui::Sense::click()))
+                            })
+                            .inner;
+                    }
+
+                    response
+                })
+                .inner;
+
+            if response.clicked() {
+                match (*self.sort_column, *self.sort_direction) {
+                    (Some(current), SortDirection::Ascending) if current == sort_column => {
+                        *self.sort_direction = SortDirection::Descending;
+                    }
+                    (Some(current), SortDirection::Descending) if current == sort_column => {
+                        *self.sort_column = None;
+                        *self.sort_direction = SortDirection::Ascending;
+                    }
+                    _ => {
+                        *self.sort_column = Some(sort_column);
+                        *self.sort_direction = SortDirection::Ascending;
+                    }
                 }
             }
         });
@@ -454,7 +471,7 @@ impl App {
             .id_salt(MODS_TABLE_ID)
             .columns(columns)
             .headers([HeaderRow::new(MODS_TABLE_HEADER_HEIGHT)])
-            .auto_size_mode(AutoSizeMode::OnParentResize)
+            .auto_size_mode(AutoSizeMode::Always)
             .num_rows(row_count)
             .show(ui, &mut delegate);
     }
@@ -467,34 +484,27 @@ impl App {
                 .resizable(false),
             Column::new(260.0)
                 .id(Id::new((MODS_TABLE_ID, ModTableColumn::Name.index())))
-                .range(Rangef::new(160.0, f32::INFINITY)),
+                .range(Rangef::new(160.0, f32::INFINITY))
+                .resizable(false),
             Column::new(140.0)
                 .id(Id::new((MODS_TABLE_ID, ModTableColumn::Author.index())))
-                .range(Rangef::new(96.0, 140.0)),
+                .range(Rangef::new(140.0, 140.0))
+                .resizable(false),
             Column::new(80.0)
                 .id(Id::new((MODS_TABLE_ID, ModTableColumn::ModId.index())))
-                .range(Rangef::new(72.0, 80.0)),
+                .range(Rangef::new(80.0, 80.0))
+                .resizable(false),
             Column::new(120.0)
                 .id(Id::new((MODS_TABLE_ID, ModTableColumn::Category.index())))
-                .range(Rangef::new(96.0, 120.0)),
+                .range(Rangef::new(120.0, 120.0))
+                .resizable(false),
             Column::new(152.0)
                 .id(Id::new((MODS_TABLE_ID, ModTableColumn::LastModified.index())))
-                .range(Rangef::new(144.0, 152.0)),
+                .range(Rangef::new(152.0, 152.0))
+                .resizable(false),
         ];
 
-        let table_id = egui_table::TableState::id(ui, Id::new(MODS_TABLE_ID));
-        let state = egui_table::TableState::load(ui.ctx(), table_id);
-        if let Some(state) = &state {
-            for (index, column) in columns.iter_mut().enumerate() {
-                if let Some(width) = state.col_widths.get(&column.id_for(index)) {
-                    column.current = column.range.clamp(*width);
-                }
-            }
-        }
-
-        if state.as_ref().and_then(|state| state.parent_width) != Some(ui.available_width()) {
-            Column::auto_size(&mut columns, ui.available_width());
-        }
+        Column::auto_size(&mut columns, ui.available_width());
 
         columns
     }
