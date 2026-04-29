@@ -4,6 +4,7 @@ use std::{f32, io};
 
 use egui::{Align2, Direction, Grid, Id, Layout, Modal, ScrollArea, TextEdit, Ui};
 use egui_async::Bind;
+use egui_extras::TableBuilder;
 use egui_material_icons::icons::ICON_DELETE;
 use egui_toast::{Toast, ToastOptions, Toasts};
 use regex::Regex;
@@ -32,6 +33,22 @@ pub enum CategoryFilter {
     Category(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModSortColumn {
+    Name,
+    Author,
+    ModId,
+    Category,
+    LastModified,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SortDirection {
+    #[default]
+    Ascending,
+    Descending,
+}
+
 #[derive(Default)]
 pub struct State {
     toasts: Toasts,
@@ -44,6 +61,8 @@ pub struct State {
     mods_category_filter: CategoryFilter,
     mods_name_filter: String,
     mods_refresh_list: Bind<Vec<ModInfo>, io::Error>,
+    mods_sort_column: Option<ModSortColumn>,
+    mods_sort_direction: SortDirection,
     misc_needs_save: bool,
 }
 
@@ -148,6 +167,126 @@ impl App {
             if let Some(Ok(modlist)) = self.state.mods_refresh_list.read() {
                 self.mods = ModList::new(modlist.to_vec());
                 self.state.mods_refresh_list.clear();
+            }
+
+            self.render_mods_table(ui);
+        });
+    }
+
+    fn render_mods_table(&mut self, ui: &mut Ui) {
+        let filtered_and_sorted = {
+            let mods = self.mods.mods();
+            let mut filtered_mods: Vec<_> = mods
+                .iter()
+                .filter(|m| {
+                    let name_matches = m.name().to_lowercase().contains(&self.state.mods_name_filter.to_lowercase());
+                    let category_matches = match &self.state.mods_category_filter {
+                        CategoryFilter::None => true,
+                        CategoryFilter::Category(cat) => m.category() == cat,
+                        CategoryFilter::Uncategorized => m.category().is_empty(),
+                    };
+                    name_matches && category_matches
+                })
+                .cloned()
+                .collect();
+
+            if let Some(sort_col) = self.state.mods_sort_column {
+                filtered_mods.sort_by(|a, b| {
+                    let cmp = match sort_col {
+                        ModSortColumn::Name => a.name().cmp(b.name()),
+                        ModSortColumn::Author => a.author().cmp(b.author()),
+                        ModSortColumn::ModId => a.mod_id().cmp(&b.mod_id()),
+                        ModSortColumn::Category => a.category().cmp(b.category()),
+                        ModSortColumn::LastModified => a.last_modified().cmp(b.last_modified()),
+                    };
+
+                    match self.state.mods_sort_direction {
+                        SortDirection::Ascending => cmp,
+                        SortDirection::Descending => cmp.reverse(),
+                    }
+                });
+            }
+            filtered_mods
+        };
+
+        let text_height = egui::TextStyle::Body.resolve(ui.style()).size;
+        let sort_col = self.state.mods_sort_column;
+        let sort_dir = self.state.mods_sort_direction;
+
+        let table = TableBuilder::new(ui)
+            .striped(true)
+            .resizable(true)
+            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+            .column(egui_extras::Column::auto())
+            .column(egui_extras::Column::remainder())
+            .column(egui_extras::Column::auto())
+            .column(egui_extras::Column::auto())
+            .column(egui_extras::Column::auto())
+            .column(egui_extras::Column::auto())
+            .min_scrolled_height(0.0);
+
+        table
+            .header(20.0, |mut header| {
+                header.col(|ui| {
+                    ui.label("Enabled");
+                });
+                self.render_sortable_header(&mut header, ModSortColumn::Name, "Name", sort_col, sort_dir);
+                self.render_sortable_header(&mut header, ModSortColumn::Author, "Author", sort_col, sort_dir);
+                self.render_sortable_header(&mut header, ModSortColumn::ModId, "Mod ID", sort_col, sort_dir);
+                self.render_sortable_header(&mut header, ModSortColumn::Category, "Category", sort_col, sort_dir);
+                self.render_sortable_header(&mut header, ModSortColumn::LastModified, "Last Modified", sort_col, sort_dir);
+            })
+            .body(|mut body| {
+                for mod_info in filtered_and_sorted {
+                    body.row(text_height.max(40.0), |mut row| {
+                        row.col(|ui| {
+                            let mut enabled = mod_info.enabled();
+                            ui.checkbox(&mut enabled, "");
+                        });
+                        row.col(|ui| {
+                            ui.add(egui::Label::new(mod_info.name()).wrap());
+                        });
+                        row.col(|ui| {
+                            ui.add(egui::Label::new(mod_info.author()).wrap());
+                        });
+                        row.col(|ui| {
+                            if let Some(id) = mod_info.mod_id() {
+                                ui.label(id.to_string());
+                            }
+                        });
+                        row.col(|ui| {
+                            ui.add(egui::Label::new(mod_info.category()).wrap());
+                        });
+                        row.col(|ui| {
+                            ui.label(mod_info.last_modified());
+                        });
+                    });
+                }
+            });
+    }
+
+    fn render_sortable_header(&mut self, header: &mut egui_extras::TableRow<'_, '_>, column: ModSortColumn, label: &str, current_col: Option<ModSortColumn>, current_dir: SortDirection) {
+        header.col(|ui| {
+            let mut header_text = label.to_string();
+
+            if current_col == Some(column) {
+                let arrow = match current_dir {
+                    SortDirection::Ascending => " ▲",
+                    SortDirection::Descending => " ▼",
+                };
+                header_text.push_str(arrow);
+            }
+
+            if ui.button(header_text).clicked() {
+                if self.state.mods_sort_column == Some(column) {
+                    self.state.mods_sort_direction = match self.state.mods_sort_direction {
+                        SortDirection::Ascending => SortDirection::Descending,
+                        SortDirection::Descending => SortDirection::Ascending,
+                    };
+                } else {
+                    self.state.mods_sort_column = Some(column);
+                    self.state.mods_sort_direction = SortDirection::Ascending;
+                }
             }
         });
     }

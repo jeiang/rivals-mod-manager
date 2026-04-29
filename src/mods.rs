@@ -43,6 +43,36 @@ pub struct ModInfo {
     files: Vec<ModFileInfo>,
 }
 
+impl ModInfo {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn author(&self) -> &str {
+        &self.author
+    }
+
+    pub fn mod_id(&self) -> Option<u32> {
+        self.mod_id
+    }
+
+    pub fn category(&self) -> &str {
+        &self.category
+    }
+
+    pub fn last_modified(&self) -> &str {
+        &self.last_modified
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+    }
+}
+
 #[derive(Default, Debug, serde::Deserialize, serde::Serialize, Clone)]
 pub struct ModFileInfo {
     subpath: PathBuf,
