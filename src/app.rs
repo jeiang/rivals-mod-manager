@@ -22,6 +22,7 @@ use egui::{
     WidgetText,
 };
 use egui_async::Bind;
+use egui_autocomplete::AutoCompleteTextEdit;
 use egui_material_icons::icons::{ICON_DELETE, ICON_KEYBOARD_ARROW_DOWN, ICON_KEYBOARD_ARROW_UP};
 use egui_table::{AutoSizeMode, CellInfo, Column, HeaderCellInfo, HeaderRow, Table, TableDelegate};
 use egui_toast::{Toast, ToastOptions, Toasts};
@@ -69,7 +70,6 @@ pub enum SortDirection {
     Descending,
 }
 
-#[derive(Default)]
 pub struct State {
     toasts: Toasts,
     settings_game_folder: Bind<PathBuf, ()>,
@@ -83,7 +83,29 @@ pub struct State {
     mods_refresh_list: Bind<ModsRefreshResult, String>,
     mods_sort_column: Option<ModSortColumn>,
     mods_sort_direction: SortDirection,
+    mods_edit_modal: Option<ModEditModal>,
     misc_needs_save: bool,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            toasts: Default::default(),
+            settings_game_folder: Default::default(),
+            settings_input_folder: Default::default(),
+            categories_new_category: Default::default(),
+            categories_modal_is_open: Default::default(),
+            categories_modal_idx: Default::default(),
+            categories_modal_matchers: Default::default(),
+            mods_category_filter: Default::default(),
+            mods_name_filter: Default::default(),
+            mods_refresh_list: Default::default(),
+            mods_sort_column: Some(ModSortColumn::Name),
+            mods_sort_direction: SortDirection::Ascending,
+            mods_edit_modal: Default::default(),
+            misc_needs_save: Default::default(),
+        }
+    }
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Default, PartialEq, Eq, Clone)]
@@ -92,6 +114,14 @@ pub enum Page {
     #[default]
     Settings,
     Categories,
+}
+
+#[derive(Clone)]
+enum ModEditModal {
+    Rename { mod_index: usize, name: String },
+    ChangeAuthor { mod_index: usize, author: String },
+    SetModId { mod_index: usize, mod_id: String },
+    ChooseCategory { mod_index: usize, category: String },
 }
 
 impl Default for App {
@@ -194,10 +224,22 @@ enum ModTableRowKind {
     Summary,
 }
 
+#[derive(Debug, Clone)]
+struct ModContextMenuData {
+    mod_index: usize,
+    name: String,
+    author: String,
+    mod_id: String,
+    category: String,
+}
+
 struct ModsTableDelegate<'a> {
     mods: &'a mut [ModInfo],
     rows: Vec<ModTableRow>,
     row_tops: Vec<f32>,
+    categories: &'a CategoryMatchers,
+    edit_modal: &'a mut Option<ModEditModal>,
+    needs_save: &'a mut bool,
     sort_column: &'a mut Option<ModSortColumn>,
     sort_direction: &'a mut SortDirection,
 }
@@ -210,6 +252,57 @@ impl ModsTableDelegate<'_> {
     fn mod_info_mut(&mut self, row_nr: u64) -> Option<&mut ModInfo> {
         let row = self.row(row_nr)?;
         self.mods.get_mut(row.mod_index)
+    }
+
+    fn mod_context_menu_data(&self, mod_index: usize) -> Option<ModContextMenuData> {
+        let mod_info = self.mods.get(mod_index)?;
+        Some(ModContextMenuData {
+            mod_index,
+            name: mod_info.name().to_string(),
+            author: mod_info.author().to_string(),
+            mod_id: mod_info.mod_id().map(|id| id.to_string()).unwrap_or_default(),
+            category: mod_info.category().to_string(),
+        })
+    }
+
+    fn attach_mod_context_menu(&mut self, response: &egui::Response, data: ModContextMenuData) {
+        response.context_menu(|ui| {
+            if ui.button("Rename mod").clicked() {
+                *self.edit_modal = Some(ModEditModal::Rename {
+                    mod_index: data.mod_index,
+                    name: data.name.clone(),
+                });
+                ui.close();
+            }
+            if ui.button("Change author").clicked() {
+                *self.edit_modal = Some(ModEditModal::ChangeAuthor {
+                    mod_index: data.mod_index,
+                    author: data.author.clone(),
+                });
+                ui.close();
+            }
+            if ui.button("Set mod id").clicked() {
+                *self.edit_modal = Some(ModEditModal::SetModId {
+                    mod_index: data.mod_index,
+                    mod_id: data.mod_id.clone(),
+                });
+                ui.close();
+            }
+            if ui.button("Choose category").clicked() {
+                *self.edit_modal = Some(ModEditModal::ChooseCategory {
+                    mod_index: data.mod_index,
+                    category: data.category.clone(),
+                });
+                ui.close();
+            }
+            if ui.button("Reset to default").clicked() {
+                if let Some(mod_info) = self.mods.get_mut(data.mod_index) {
+                    mod_info.reset_to_default(self.categories);
+                    *self.needs_save = true;
+                }
+                ui.close();
+            }
+        });
     }
 
     fn render_header_cell(&mut self, ui: &mut Ui, column: ModTableColumn) {
@@ -247,7 +340,6 @@ impl ModsTableDelegate<'_> {
                         *self.sort_direction = SortDirection::Descending;
                     }
                     (Some(current), SortDirection::Descending) if current == sort_column => {
-                        *self.sort_column = None;
                         *self.sort_direction = SortDirection::Ascending;
                     }
                     _ => {
@@ -261,35 +353,50 @@ impl ModsTableDelegate<'_> {
 
     fn render_summary_cell(&mut self, ui: &mut Ui, row_nr: u64, column: ModTableColumn) {
         Self::cell_frame().show(ui, |ui| {
-            let Some(mod_info) = self.mod_info_mut(row_nr) else {
+            let Some(row) = self.row(row_nr) else {
+                return;
+            };
+            let mod_index = row.mod_index;
+
+            let Some(data) = self.mod_context_menu_data(mod_index) else {
                 return;
             };
 
-            match column {
+            let Some(mod_info) = self.mods.get_mut(mod_index) else {
+                return;
+            };
+
+            let response = match column {
                 ModTableColumn::Enabled => {
                     let mut enabled = mod_info.enabled();
-                    if ui.checkbox(&mut enabled, "").changed() {
+                    let response = ui.checkbox(&mut enabled, "");
+                    if response.changed() {
                         mod_info.set_enabled(enabled);
                     }
+                    response
                 }
                 ModTableColumn::Name => {
-                    ui.add(egui::Label::new(mod_info.name()).wrap());
+                    ui.add(egui::Label::new(mod_info.name()).wrap().sense(egui::Sense::click()))
                 }
-                ModTableColumn::Author => {
-                    ui.add(egui::Label::new(mod_info.author()).truncate());
-                }
+                ModTableColumn::Author => ui.add(
+                    egui::Label::new(mod_info.author()).truncate().sense(egui::Sense::click()),
+                ),
                 ModTableColumn::ModId => {
                     if let Some(id) = mod_info.mod_id() {
-                        ui.label(id.to_string());
+                        ui.add(egui::Label::new(id.to_string()).sense(egui::Sense::click()))
+                    } else {
+                        ui.label("")
                     }
                 }
-                ModTableColumn::Category => {
-                    ui.add(egui::Label::new(mod_info.category()).truncate());
-                }
+                ModTableColumn::Category => ui.add(
+                    egui::Label::new(mod_info.category()).truncate().sense(egui::Sense::click()),
+                ),
                 ModTableColumn::LastModified => {
-                    ui.label(mod_info.last_modified());
+                    ui.add(egui::Label::new(mod_info.last_modified()).sense(egui::Sense::click()))
                 }
-            }
+            };
+
+            self.attach_mod_context_menu(&response, data);
         });
     }
 
@@ -312,6 +419,21 @@ impl TableDelegate for ModsTableDelegate<'_> {
         let row_color =
             if row_nr % 2 == 0 { ui.visuals().extreme_bg_color } else { Color32::TRANSPARENT };
         ui.painter().rect_filled(ui.max_rect(), 0.0, row_color);
+
+        let Some(row) = self.row(row_nr) else {
+            return;
+        };
+
+        let Some(data) = self.mod_context_menu_data(row.mod_index) else {
+            return;
+        };
+
+        let response = ui.interact(
+            ui.max_rect(),
+            ui.id().with(("mods_table_context_menu", row_nr)),
+            egui::Sense::click(),
+        );
+        self.attach_mod_context_menu(&response, data);
     }
 
     fn cell_ui(&mut self, ui: &mut Ui, cell: &CellInfo) {
@@ -437,6 +559,7 @@ impl App {
             } else {
                 self.render_mods_table(ui);
             }
+            self.render_mod_edit_modal(ui);
         });
     }
 
@@ -455,6 +578,145 @@ impl App {
             options: ToastOptions::default().show_progress(true).duration_in_seconds(5.0),
             ..Default::default()
         });
+    }
+
+    fn render_mod_edit_modal(&mut self, ui: &mut Ui) {
+        let Some(mut edit_modal) = self.state.mods_edit_modal.take() else {
+            return;
+        };
+
+        let mut keep_open = true;
+        let modal = Modal::new(Id::new("Mod Edit Modal")).show(ui.ctx(), |ui| {
+            ui.set_width(420.0);
+
+            match &mut edit_modal {
+                ModEditModal::Rename { mod_index, name } => {
+                    ui.heading("Rename Mod");
+                    ui.add(TextEdit::singleline(name).desired_width(ui.available_width()));
+                    self.render_mod_edit_actions(ui, &mut keep_open, |app| {
+                        if let Some(mod_info) = app.mods.mods_mut().get_mut(*mod_index) {
+                            mod_info.set_name(name.trim().to_string());
+                            app.state.misc_needs_save = true;
+                        }
+                        true
+                    });
+                }
+                ModEditModal::ChangeAuthor { mod_index, author } => {
+                    ui.heading("Change Author");
+                    let existing_authors = self.existing_mod_authors();
+                    let available_width = ui.available_width();
+                    ui.add(
+                        AutoCompleteTextEdit::new(author, &existing_authors)
+                            .max_suggestions(8)
+                            .highlight_matches(true)
+                            .popup_on_focus(true)
+                            .width(available_width)
+                            .set_text_edit_properties(move |text_edit| {
+                                text_edit.desired_width(available_width)
+                            }),
+                    );
+                    self.render_mod_edit_actions(ui, &mut keep_open, |app| {
+                        if let Some(mod_info) = app.mods.mods_mut().get_mut(*mod_index) {
+                            mod_info.set_author(author.trim().to_string());
+                            app.state.misc_needs_save = true;
+                        }
+                        true
+                    });
+                }
+                ModEditModal::SetModId { mod_index, mod_id } => {
+                    ui.heading("Set Mod ID");
+                    ui.add(TextEdit::singleline(mod_id).desired_width(ui.available_width()));
+                    self.render_mod_edit_actions(ui, &mut keep_open, |app| {
+                        let mod_id = mod_id.trim();
+                        let parsed_mod_id = if mod_id.is_empty() {
+                            None
+                        } else {
+                            match mod_id.parse::<u32>() {
+                                Ok(mod_id) => Some(mod_id),
+                                Err(err) => {
+                                    app.add_error_toast(format!("Invalid mod id: {err}"));
+                                    return false;
+                                }
+                            }
+                        };
+
+                        if let Some(mod_info) = app.mods.mods_mut().get_mut(*mod_index) {
+                            mod_info.set_mod_id(parsed_mod_id);
+                            app.state.misc_needs_save = true;
+                        }
+                        true
+                    });
+                }
+                ModEditModal::ChooseCategory { mod_index, category } => {
+                    ui.heading("Choose Category");
+                    egui::ComboBox::from_id_salt("mod_category_picker")
+                        .selected_text(category.as_str())
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                category,
+                                "Uncategorized".to_string(),
+                                "Uncategorized",
+                            );
+                            for category_matcher in &self.categories {
+                                ui.selectable_value(
+                                    category,
+                                    category_matcher.name().to_string(),
+                                    category_matcher.name(),
+                                );
+                            }
+                        });
+                    self.render_mod_edit_actions(ui, &mut keep_open, |app| {
+                        if let Some(mod_info) = app.mods.mods_mut().get_mut(*mod_index) {
+                            mod_info.set_category(category.clone());
+                            app.state.misc_needs_save = true;
+                        }
+                        true
+                    });
+                }
+            }
+        });
+
+        if modal.should_close() {
+            keep_open = false;
+        }
+
+        if keep_open {
+            self.state.mods_edit_modal = Some(edit_modal);
+        }
+    }
+
+    fn render_mod_edit_actions(
+        &mut self,
+        ui: &mut Ui,
+        keep_open: &mut bool,
+        mut save: impl FnMut(&mut Self) -> bool,
+    ) {
+        ui.horizontal(|ui| {
+            ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Save").clicked() && save(self) {
+                    *keep_open = false;
+                    ui.close();
+                }
+                if ui.button("Cancel").clicked() {
+                    *keep_open = false;
+                    ui.close();
+                }
+            });
+        });
+    }
+
+    fn existing_mod_authors(&self) -> Vec<String> {
+        let mut authors = self
+            .mods
+            .mods()
+            .iter()
+            .map(|mod_info| mod_info.author().trim())
+            .filter(|author| !author.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        authors.sort();
+        authors.dedup();
+        authors
     }
 
     fn render_mods_table(&mut self, ui: &mut Ui) {
@@ -509,6 +771,9 @@ impl App {
             mods: self.mods.mods_mut(),
             rows,
             row_tops,
+            categories: &self.categories,
+            edit_modal: &mut self.state.mods_edit_modal,
+            needs_save: &mut self.state.misc_needs_save,
             sort_column: &mut self.state.mods_sort_column,
             sort_direction: &mut self.state.mods_sort_direction,
         };

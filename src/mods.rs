@@ -74,6 +74,10 @@ impl ModInfo {
         self.mod_id
     }
 
+    pub fn set_mod_id(&mut self, mod_id: Option<u32>) {
+        self.mod_id = mod_id;
+    }
+
     pub fn category(&self) -> &str {
         &self.category
     }
@@ -92,6 +96,17 @@ impl ModInfo {
 
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
+    }
+
+    pub fn reset_to_default(&mut self, matchers: &[CategoryMatcher]) {
+        let pathinfo = try_parse_name(&self.path);
+        self.name = pathinfo.name;
+        self.mod_id = pathinfo.mod_id;
+        self.author = pathinfo.author.unwrap_or("Unknown".to_string());
+        self.category = match_category(matchers, &self.name);
+        if let Ok(last_modified) = get_last_modified(&self.path) {
+            self.last_modified = last_modified;
+        }
     }
 }
 
