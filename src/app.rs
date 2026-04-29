@@ -2,10 +2,27 @@ use std::path::PathBuf;
 use std::time::Duration;
 use std::{f32, io};
 
-use egui::{Align2, Direction, Grid, Id, Layout, Modal, ScrollArea, TextEdit, Ui};
+use egui::{
+    Align2,
+    Color32,
+    Direction,
+    Frame,
+    Grid,
+    Id,
+    Layout,
+    Margin,
+    Modal,
+    Rangef,
+    ScrollArea,
+    TextEdit,
+    TextStyle,
+    TextWrapMode,
+    Ui,
+    WidgetText,
+};
 use egui_async::Bind;
-use egui_extras::TableBuilder;
 use egui_material_icons::icons::ICON_DELETE;
+use egui_table::{AutoSizeMode, CellInfo, Column, HeaderCellInfo, HeaderRow, Table, TableDelegate};
 use egui_toast::{Toast, ToastOptions, Toasts};
 use regex::Regex;
 
@@ -98,6 +115,210 @@ const fn game_path() -> &'static str {
     }
 }
 
+const MODS_TABLE_ID: &str = "mods_table";
+const MODS_TABLE_HEADER_HEIGHT: f32 = 24.0;
+const MODS_TABLE_ROW_MIN_HEIGHT: f32 = 40.0;
+const MODS_TABLE_CELL_MARGIN_X: i8 = 8;
+const MODS_TABLE_CELL_MARGIN_Y: i8 = 4;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModTableColumn {
+    Enabled,
+    Name,
+    Author,
+    ModId,
+    Category,
+    LastModified,
+}
+
+impl ModTableColumn {
+    const ALL: [Self; 6] =
+        [Self::Enabled, Self::Name, Self::Author, Self::ModId, Self::Category, Self::LastModified];
+
+    fn from_index(index: usize) -> Option<Self> {
+        Self::ALL.get(index).copied()
+    }
+
+    fn index(self) -> usize {
+        match self {
+            Self::Enabled => 0,
+            Self::Name => 1,
+            Self::Author => 2,
+            Self::ModId => 3,
+            Self::Category => 4,
+            Self::LastModified => 5,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Enabled => "Enabled",
+            Self::Name => "Name",
+            Self::Author => "Author",
+            Self::ModId => "Mod ID",
+            Self::Category => "Category",
+            Self::LastModified => "Last Modified",
+        }
+    }
+
+    fn sort_column(self) -> Option<ModSortColumn> {
+        match self {
+            Self::Enabled => None,
+            Self::Name => Some(ModSortColumn::Name),
+            Self::Author => Some(ModSortColumn::Author),
+            Self::ModId => Some(ModSortColumn::ModId),
+            Self::Category => Some(ModSortColumn::Category),
+            Self::LastModified => Some(ModSortColumn::LastModified),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ModTableRow {
+    mod_index: usize,
+    kind: ModTableRowKind,
+}
+
+impl ModTableRow {
+    fn summary(mod_index: usize) -> Self {
+        Self { mod_index, kind: ModTableRowKind::Summary }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ModTableRowKind {
+    Summary,
+}
+
+struct ModsTableDelegate<'a> {
+    mods: &'a mut [ModInfo],
+    rows: Vec<ModTableRow>,
+    row_tops: Vec<f32>,
+    sort_column: &'a mut Option<ModSortColumn>,
+    sort_direction: &'a mut SortDirection,
+}
+
+impl ModsTableDelegate<'_> {
+    fn row(&self, row_nr: u64) -> Option<ModTableRow> {
+        usize::try_from(row_nr).ok().and_then(|index| self.rows.get(index)).copied()
+    }
+
+    fn mod_info_mut(&mut self, row_nr: u64) -> Option<&mut ModInfo> {
+        let row = self.row(row_nr)?;
+        self.mods.get_mut(row.mod_index)
+    }
+
+    fn render_header_cell(&mut self, ui: &mut Ui, column: ModTableColumn) {
+        Self::cell_frame().show(ui, |ui| {
+            let Some(sort_column) = column.sort_column() else {
+                ui.label(column.label());
+                return;
+            };
+
+            let mut header_text = column.label().to_string();
+            if *self.sort_column == Some(sort_column) {
+                let arrow = match self.sort_direction {
+                    SortDirection::Ascending => " ▲",
+                    SortDirection::Descending => " ▼",
+                };
+                header_text.push_str(arrow);
+            }
+
+            if ui.button(header_text).clicked() {
+                if *self.sort_column == Some(sort_column) {
+                    *self.sort_direction = match self.sort_direction {
+                        SortDirection::Ascending => SortDirection::Descending,
+                        SortDirection::Descending => SortDirection::Ascending,
+                    };
+                } else {
+                    *self.sort_column = Some(sort_column);
+                    *self.sort_direction = SortDirection::Ascending;
+                }
+            }
+        });
+    }
+
+    fn render_summary_cell(&mut self, ui: &mut Ui, row_nr: u64, column: ModTableColumn) {
+        Self::cell_frame().show(ui, |ui| {
+            let Some(mod_info) = self.mod_info_mut(row_nr) else {
+                return;
+            };
+
+            match column {
+                ModTableColumn::Enabled => {
+                    let mut enabled = mod_info.enabled();
+                    if ui.checkbox(&mut enabled, "").changed() {
+                        mod_info.set_enabled(enabled);
+                    }
+                }
+                ModTableColumn::Name => {
+                    ui.add(egui::Label::new(mod_info.name()).wrap());
+                }
+                ModTableColumn::Author => {
+                    ui.add(egui::Label::new(mod_info.author()).truncate());
+                }
+                ModTableColumn::ModId => {
+                    if let Some(id) = mod_info.mod_id() {
+                        ui.label(id.to_string());
+                    }
+                }
+                ModTableColumn::Category => {
+                    ui.add(egui::Label::new(mod_info.category()).truncate());
+                }
+                ModTableColumn::LastModified => {
+                    ui.label(mod_info.last_modified());
+                }
+            }
+        });
+    }
+
+    fn cell_frame() -> Frame {
+        Frame::NONE
+            .inner_margin(Margin::symmetric(MODS_TABLE_CELL_MARGIN_X, MODS_TABLE_CELL_MARGIN_Y))
+    }
+}
+
+impl TableDelegate for ModsTableDelegate<'_> {
+    fn header_cell_ui(&mut self, ui: &mut Ui, cell: &HeaderCellInfo) {
+        let Some(column) = ModTableColumn::from_index(cell.col_range.start) else {
+            return;
+        };
+
+        self.render_header_cell(ui, column);
+    }
+
+    fn row_ui(&mut self, ui: &mut Ui, row_nr: u64) {
+        let row_color =
+            if row_nr % 2 == 0 { ui.visuals().extreme_bg_color } else { Color32::TRANSPARENT };
+        ui.painter().rect_filled(ui.max_rect(), 0.0, row_color);
+    }
+
+    fn cell_ui(&mut self, ui: &mut Ui, cell: &CellInfo) {
+        let Some(row) = self.row(cell.row_nr) else {
+            return;
+        };
+        let Some(column) = ModTableColumn::from_index(cell.col_nr) else {
+            return;
+        };
+
+        match row.kind {
+            ModTableRowKind::Summary => self.render_summary_cell(ui, cell.row_nr, column),
+        }
+    }
+
+    fn row_top_offset(&self, _ctx: &egui::Context, _table_id: Id, row_nr: u64) -> f32 {
+        usize::try_from(row_nr)
+            .ok()
+            .and_then(|index| self.row_tops.get(index))
+            .copied()
+            .unwrap_or_else(|| self.row_tops.last().copied().unwrap_or(0.0))
+    }
+
+    fn default_row_height(&self) -> f32 {
+        MODS_TABLE_ROW_MIN_HEIGHT
+    }
+}
+
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let ctx = &cc.egui_ctx;
@@ -174,24 +395,29 @@ impl App {
     }
 
     fn render_mods_table(&mut self, ui: &mut Ui) {
-        let filtered_and_sorted = {
+        let rows = {
             let mods = self.mods.mods();
+            let name_filter = self.state.mods_name_filter.to_lowercase();
             let mut filtered_mods: Vec<_> = mods
                 .iter()
+                .enumerate()
                 .filter(|m| {
-                    let name_matches = m.name().to_lowercase().contains(&self.state.mods_name_filter.to_lowercase());
+                    let mod_info = m.1;
+                    let name_matches = mod_info.name().to_lowercase().contains(&name_filter);
                     let category_matches = match &self.state.mods_category_filter {
                         CategoryFilter::None => true,
-                        CategoryFilter::Category(cat) => m.category() == cat,
-                        CategoryFilter::Uncategorized => m.category().is_empty(),
+                        CategoryFilter::Category(cat) => mod_info.category() == cat,
+                        CategoryFilter::Uncategorized => mod_info.category().is_empty(),
                     };
                     name_matches && category_matches
                 })
-                .cloned()
+                .map(|m| m.0)
                 .collect();
 
             if let Some(sort_col) = self.state.mods_sort_column {
                 filtered_mods.sort_by(|a, b| {
+                    let a = &mods[*a];
+                    let b = &mods[*b];
                     let cmp = match sort_col {
                         ModSortColumn::Name => a.name().cmp(b.name()),
                         ModSortColumn::Author => a.author().cmp(b.author()),
@@ -206,89 +432,102 @@ impl App {
                     }
                 });
             }
-            filtered_mods
+
+            filtered_mods.into_iter().map(ModTableRow::summary).collect::<Vec<_>>()
         };
 
-        let text_height = egui::TextStyle::Body.resolve(ui.style()).size;
-        let sort_col = self.state.mods_sort_column;
-        let sort_dir = self.state.mods_sort_direction;
+        let columns = self.mods_table_columns(ui);
+        let name_width = columns[ModTableColumn::Name.index()].current
+            - f32::from(MODS_TABLE_CELL_MARGIN_X) * 2.0;
+        let row_tops = self.mods_table_row_tops(ui, &rows, name_width.max(1.0));
+        let row_count = u64::try_from(rows.len()).unwrap_or(u64::MAX);
 
-        let table = TableBuilder::new(ui)
-            .striped(true)
-            .resizable(true)
-            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-            .column(egui_extras::Column::auto())
-            .column(egui_extras::Column::remainder())
-            .column(egui_extras::Column::auto())
-            .column(egui_extras::Column::auto())
-            .column(egui_extras::Column::auto())
-            .column(egui_extras::Column::auto())
-            .min_scrolled_height(0.0);
+        let mut delegate = ModsTableDelegate {
+            mods: self.mods.mods_mut(),
+            rows,
+            row_tops,
+            sort_column: &mut self.state.mods_sort_column,
+            sort_direction: &mut self.state.mods_sort_direction,
+        };
 
-        table
-            .header(20.0, |mut header| {
-                header.col(|ui| {
-                    ui.label("Enabled");
-                });
-                self.render_sortable_header(&mut header, ModSortColumn::Name, "Name", sort_col, sort_dir);
-                self.render_sortable_header(&mut header, ModSortColumn::Author, "Author", sort_col, sort_dir);
-                self.render_sortable_header(&mut header, ModSortColumn::ModId, "Mod ID", sort_col, sort_dir);
-                self.render_sortable_header(&mut header, ModSortColumn::Category, "Category", sort_col, sort_dir);
-                self.render_sortable_header(&mut header, ModSortColumn::LastModified, "Last Modified", sort_col, sort_dir);
-            })
-            .body(|mut body| {
-                for mod_info in filtered_and_sorted {
-                    body.row(text_height.max(40.0), |mut row| {
-                        row.col(|ui| {
-                            let mut enabled = mod_info.enabled();
-                            ui.checkbox(&mut enabled, "");
-                        });
-                        row.col(|ui| {
-                            ui.add(egui::Label::new(mod_info.name()).wrap());
-                        });
-                        row.col(|ui| {
-                            ui.add(egui::Label::new(mod_info.author()).wrap());
-                        });
-                        row.col(|ui| {
-                            if let Some(id) = mod_info.mod_id() {
-                                ui.label(id.to_string());
-                            }
-                        });
-                        row.col(|ui| {
-                            ui.add(egui::Label::new(mod_info.category()).wrap());
-                        });
-                        row.col(|ui| {
-                            ui.label(mod_info.last_modified());
-                        });
-                    });
-                }
-            });
+        Table::new()
+            .id_salt(MODS_TABLE_ID)
+            .columns(columns)
+            .headers([HeaderRow::new(MODS_TABLE_HEADER_HEIGHT)])
+            .auto_size_mode(AutoSizeMode::OnParentResize)
+            .num_rows(row_count)
+            .show(ui, &mut delegate);
     }
 
-    fn render_sortable_header(&mut self, header: &mut egui_extras::TableRow<'_, '_>, column: ModSortColumn, label: &str, current_col: Option<ModSortColumn>, current_dir: SortDirection) {
-        header.col(|ui| {
-            let mut header_text = label.to_string();
+    fn mods_table_columns(&self, ui: &Ui) -> Vec<Column> {
+        let mut columns = vec![
+            Column::new(72.0)
+                .id(Id::new((MODS_TABLE_ID, ModTableColumn::Enabled.index())))
+                .range(Rangef::new(72.0, 72.0))
+                .resizable(false),
+            Column::new(260.0)
+                .id(Id::new((MODS_TABLE_ID, ModTableColumn::Name.index())))
+                .range(Rangef::new(160.0, f32::INFINITY)),
+            Column::new(140.0)
+                .id(Id::new((MODS_TABLE_ID, ModTableColumn::Author.index())))
+                .range(Rangef::new(96.0, 140.0)),
+            Column::new(80.0)
+                .id(Id::new((MODS_TABLE_ID, ModTableColumn::ModId.index())))
+                .range(Rangef::new(72.0, 80.0)),
+            Column::new(120.0)
+                .id(Id::new((MODS_TABLE_ID, ModTableColumn::Category.index())))
+                .range(Rangef::new(96.0, 120.0)),
+            Column::new(152.0)
+                .id(Id::new((MODS_TABLE_ID, ModTableColumn::LastModified.index())))
+                .range(Rangef::new(144.0, 152.0)),
+        ];
 
-            if current_col == Some(column) {
-                let arrow = match current_dir {
-                    SortDirection::Ascending => " ▲",
-                    SortDirection::Descending => " ▼",
-                };
-                header_text.push_str(arrow);
-            }
-
-            if ui.button(header_text).clicked() {
-                if self.state.mods_sort_column == Some(column) {
-                    self.state.mods_sort_direction = match self.state.mods_sort_direction {
-                        SortDirection::Ascending => SortDirection::Descending,
-                        SortDirection::Descending => SortDirection::Ascending,
-                    };
-                } else {
-                    self.state.mods_sort_column = Some(column);
-                    self.state.mods_sort_direction = SortDirection::Ascending;
+        let table_id = egui_table::TableState::id(ui, Id::new(MODS_TABLE_ID));
+        let state = egui_table::TableState::load(ui.ctx(), table_id);
+        if let Some(state) = &state {
+            for (index, column) in columns.iter_mut().enumerate() {
+                if let Some(width) = state.col_widths.get(&column.id_for(index)) {
+                    column.current = column.range.clamp(*width);
                 }
             }
-        });
+        }
+
+        if state.as_ref().and_then(|state| state.parent_width) != Some(ui.available_width()) {
+            Column::auto_size(&mut columns, ui.available_width());
+        }
+
+        columns
+    }
+
+    fn mods_table_row_tops(&self, ui: &Ui, rows: &[ModTableRow], name_width: f32) -> Vec<f32> {
+        let mut row_tops = Vec::with_capacity(rows.len() + 1);
+        let mut next_top = 0.0;
+        row_tops.push(next_top);
+
+        for row in rows {
+            let height = match row.kind {
+                ModTableRowKind::Summary => self.mods_table_summary_row_height(
+                    ui,
+                    &self.mods.mods()[row.mod_index],
+                    name_width,
+                ),
+            };
+            next_top += height;
+            row_tops.push(next_top);
+        }
+
+        row_tops
+    }
+
+    fn mods_table_summary_row_height(&self, ui: &Ui, mod_info: &ModInfo, name_width: f32) -> f32 {
+        let galley = WidgetText::from(mod_info.name()).into_galley(
+            ui,
+            Some(TextWrapMode::Wrap),
+            name_width,
+            TextStyle::Body,
+        );
+        let vertical_margin = f32::from(MODS_TABLE_CELL_MARGIN_Y) * 2.0;
+        (galley.size().y + vertical_margin).max(MODS_TABLE_ROW_MIN_HEIGHT)
     }
 
     fn settings_page(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
