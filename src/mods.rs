@@ -98,6 +98,14 @@ impl ModInfo {
         self.enabled = enabled;
     }
 
+    pub fn files(&self) -> &[ModFileInfo] {
+        &self.files
+    }
+
+    pub fn files_mut(&mut self) -> &mut [ModFileInfo] {
+        &mut self.files
+    }
+
     pub fn reset_to_default(&mut self, matchers: &[CategoryMatcher]) {
         let pathinfo = try_parse_name(&self.path);
         self.name = pathinfo.name;
@@ -114,6 +122,20 @@ impl ModInfo {
 pub struct ModFileInfo {
     subpath: PathBuf,
     enabled: bool,
+}
+
+impl ModFileInfo {
+    pub fn subpath(&self) -> &Path {
+        &self.subpath
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+    }
 }
 
 pub async fn refresh_mod_list(

@@ -23,7 +23,12 @@ use egui::{
 };
 use egui_async::Bind;
 use egui_autocomplete::AutoCompleteTextEdit;
-use egui_material_icons::icons::{ICON_DELETE, ICON_KEYBOARD_ARROW_DOWN, ICON_KEYBOARD_ARROW_UP};
+use egui_material_icons::icons::{
+    ICON_DELETE,
+    ICON_KEYBOARD_ARROW_DOWN,
+    ICON_KEYBOARD_ARROW_RIGHT,
+    ICON_KEYBOARD_ARROW_UP,
+};
 use egui_table::{AutoSizeMode, CellInfo, Column, HeaderCellInfo, HeaderRow, Table, TableDelegate};
 use egui_toast::{Toast, ToastOptions, Toasts};
 use regex::Regex;
@@ -85,6 +90,7 @@ pub struct State {
     mods_sort_direction: SortDirection,
     mods_selected_indices: BTreeSet<usize>,
     mods_selection_anchor: Option<usize>,
+    mods_expanded_indices: BTreeSet<usize>,
     mods_edit_modal: Option<ModEditModal>,
     misc_needs_save: bool,
 }
@@ -106,6 +112,7 @@ impl Default for State {
             mods_sort_direction: SortDirection::Ascending,
             mods_selected_indices: Default::default(),
             mods_selection_anchor: Default::default(),
+            mods_expanded_indices: Default::default(),
             mods_edit_modal: Default::default(),
             misc_needs_save: Default::default(),
         }
@@ -156,6 +163,7 @@ const fn game_path() -> &'static str {
 const MODS_TABLE_ID: &str = "mods_table";
 const MODS_TABLE_HEADER_HEIGHT: f32 = 24.0;
 const MODS_TABLE_ROW_MIN_HEIGHT: f32 = 40.0;
+const MODS_TABLE_FILE_ROW_HEIGHT: f32 = 28.0;
 const MODS_TABLE_CELL_MARGIN_X: i8 = 8;
 const MODS_TABLE_CELL_MARGIN_Y: i8 = 4;
 
@@ -221,11 +229,16 @@ impl ModTableRow {
     fn summary(mod_index: usize) -> Self {
         Self { mod_index, kind: ModTableRowKind::Summary }
     }
+
+    fn file(mod_index: usize, file_index: usize) -> Self {
+        Self { mod_index, kind: ModTableRowKind::File { file_index } }
+    }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ModTableRowKind {
     Summary,
+    File { file_index: usize },
 }
 
 #[derive(Debug, Clone)]
@@ -249,6 +262,7 @@ struct ModsTableDelegate<'a> {
     needs_save: &'a mut bool,
     selected_mod_indices: &'a mut BTreeSet<usize>,
     selection_anchor: &'a mut Option<usize>,
+    expanded_mod_indices: &'a mut BTreeSet<usize>,
     sort_column: &'a mut Option<ModSortColumn>,
     sort_direction: &'a mut SortDirection,
 }
@@ -268,11 +282,21 @@ impl ModsTableDelegate<'_> {
         start_mod_index: usize,
         end_mod_index: usize,
     ) -> Option<Vec<usize>> {
-        let start = self.rows.iter().position(|row| row.mod_index == start_mod_index)?;
-        let end = self.rows.iter().position(|row| row.mod_index == end_mod_index)?;
+        let start = self.rows.iter().position(|row| {
+            row.mod_index == start_mod_index && row.kind == ModTableRowKind::Summary
+        })?;
+        let end = self.rows.iter().position(|row| {
+            row.mod_index == end_mod_index && row.kind == ModTableRowKind::Summary
+        })?;
         let (from, to) = if start <= end { (start, end) } else { (end, start) };
 
-        Some(self.rows[from..=to].iter().map(|row| row.mod_index).collect())
+        Some(
+            self.rows[from..=to]
+                .iter()
+                .filter(|row| row.kind == ModTableRowKind::Summary)
+                .map(|row| row.mod_index)
+                .collect(),
+        )
     }
 
     fn mod_context_menu_data(&self, mod_index: usize) -> Option<ModContextMenuData> {
@@ -457,41 +481,166 @@ impl ModsTableDelegate<'_> {
             };
             let mod_index = row.mod_index;
 
-            let Some(mod_info) = self.mods.get_mut(mod_index) else {
+            if self.mods.get(mod_index).is_none() {
                 return;
-            };
+            }
 
             let response = match column {
                 ModTableColumn::Enabled => {
-                    let mut enabled = mod_info.enabled();
-                    let response = ui.checkbox(&mut enabled, "");
-                    if response.changed() {
-                        mod_info.set_enabled(enabled);
+                    let has_files = self
+                        .mods
+                        .get(mod_index)
+                        .is_some_and(|mod_info| !mod_info.files().is_empty());
+                    let is_expanded = self.expanded_mod_indices.contains(&mod_index);
+                    let enabled_file_count = self
+                        .mods
+                        .get(mod_index)
+                        .map(|mod_info| {
+                            mod_info.files().iter().filter(|file_info| file_info.enabled()).count()
+                        })
+                        .unwrap_or_default();
+                    let mut enabled = has_files
+                        && self
+                            .mods
+                            .get(mod_index)
+                            .is_some_and(|mod_info| enabled_file_count == mod_info.files().len());
+                    let indeterminate = has_files && enabled_file_count > 0 && !enabled;
+                    let mut enabled_changed = false;
+
+                    let response = ui
+                        .horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            let mut response = if has_files {
+                                let icon = if is_expanded {
+                                    ICON_KEYBOARD_ARROW_DOWN
+                                } else {
+                                    ICON_KEYBOARD_ARROW_RIGHT
+                                };
+                                let response = ui.add(
+                                    egui::Button::new(icon)
+                                        .frame(false)
+                                        .min_size(egui::vec2(18.0, 18.0)),
+                                );
+                                if response.clicked() {
+                                    if is_expanded {
+                                        self.expanded_mod_indices.remove(&mod_index);
+                                    } else {
+                                        self.expanded_mod_indices.insert(mod_index);
+                                    }
+                                }
+                                response
+                            } else {
+                                ui.allocate_response(egui::vec2(18.0, 18.0), egui::Sense::hover())
+                            };
+
+                            let checkbox = ui.add(
+                                egui::Checkbox::without_text(&mut enabled)
+                                    .indeterminate(indeterminate),
+                            );
+                            if checkbox.changed() {
+                                enabled_changed = true;
+                            }
+                            response |= checkbox;
+                            response
+                        })
+                        .inner;
+
+                    if enabled_changed {
+                        if let Some(mod_info) = self.mods.get_mut(mod_index) {
+                            for file_info in mod_info.files_mut() {
+                                file_info.set_enabled(enabled);
+                            }
+                            *self.needs_save = true;
+                        }
                     }
                     response
                 }
                 ModTableColumn::Name => {
-                    ui.add(egui::Label::new(mod_info.name()).wrap().sense(egui::Sense::click()))
+                    let name =
+                        self.mods.get(mod_index).map(|mod_info| mod_info.name()).unwrap_or("");
+                    ui.add(egui::Label::new(name).wrap().sense(egui::Sense::click()))
                 }
                 ModTableColumn::Author => ui.add(
-                    egui::Label::new(mod_info.author()).truncate().sense(egui::Sense::click()),
+                    egui::Label::new(
+                        self.mods.get(mod_index).map(|mod_info| mod_info.author()).unwrap_or(""),
+                    )
+                    .truncate()
+                    .sense(egui::Sense::click()),
                 ),
                 ModTableColumn::ModId => {
-                    if let Some(id) = mod_info.mod_id() {
+                    if let Some(id) =
+                        self.mods.get(mod_index).and_then(|mod_info| mod_info.mod_id())
+                    {
                         ui.add(egui::Label::new(id.to_string()).sense(egui::Sense::click()))
                     } else {
-                        ui.label("")
+                        ui.add(egui::Label::new("").sense(egui::Sense::click()))
                     }
                 }
                 ModTableColumn::Category => ui.add(
-                    egui::Label::new(mod_info.category()).truncate().sense(egui::Sense::click()),
+                    egui::Label::new(
+                        self.mods.get(mod_index).map(|mod_info| mod_info.category()).unwrap_or(""),
+                    )
+                    .truncate()
+                    .sense(egui::Sense::click()),
                 ),
-                ModTableColumn::LastModified => {
-                    ui.add(egui::Label::new(mod_info.last_modified()).sense(egui::Sense::click()))
-                }
+                ModTableColumn::LastModified => ui.add(
+                    egui::Label::new(
+                        self.mods
+                            .get(mod_index)
+                            .map(|mod_info| mod_info.last_modified())
+                            .unwrap_or(""),
+                    )
+                    .sense(egui::Sense::click()),
+                ),
             };
 
             self.attach_mod_context_menu(&response, mod_index);
+        });
+    }
+
+    fn render_file_cell(&mut self, ui: &mut Ui, row: ModTableRow, column: ModTableColumn) {
+        let ModTableRowKind::File { file_index } = row.kind else {
+            return;
+        };
+
+        Self::cell_frame().show(ui, |ui| match column {
+            ModTableColumn::Enabled => {
+                ui.add_space(22.0);
+                if let Some(file_info) = self
+                    .mods
+                    .get_mut(row.mod_index)
+                    .and_then(|mod_info| mod_info.files_mut().get_mut(file_index))
+                {
+                    let mut enabled = file_info.enabled();
+                    if ui.checkbox(&mut enabled, "").changed() {
+                        file_info.set_enabled(enabled);
+                        *self.needs_save = true;
+                    }
+                }
+            }
+            ModTableColumn::Name => {
+                let subpath = self
+                    .mods
+                    .get(row.mod_index)
+                    .and_then(|mod_info| mod_info.files().get(file_index))
+                    .map(|file_info| file_info.subpath().display().to_string())
+                    .unwrap_or_default();
+
+                ui.horizontal(|ui| {
+                    ui.add_space(22.0);
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(subpath).small())
+                            .truncate()
+                            .sense(egui::Sense::click()),
+                    );
+                });
+            }
+            ModTableColumn::Author
+            | ModTableColumn::ModId
+            | ModTableColumn::Category
+            | ModTableColumn::LastModified => {
+                ui.label("");
+            }
         });
     }
 
@@ -515,21 +664,24 @@ impl TableDelegate for ModsTableDelegate<'_> {
             return;
         };
 
-        let row_color = if self.selected_mod_indices.contains(&row.mod_index) {
-            ui.visuals().selection.bg_fill
-        } else if row_nr % 2 == 0 {
-            ui.visuals().extreme_bg_color
-        } else {
-            Color32::TRANSPARENT
+        let row_color = match row.kind {
+            ModTableRowKind::Summary if self.selected_mod_indices.contains(&row.mod_index) => {
+                ui.visuals().selection.bg_fill
+            }
+            ModTableRowKind::Summary if row_nr % 2 == 0 => ui.visuals().extreme_bg_color,
+            ModTableRowKind::File { .. } => ui.visuals().faint_bg_color,
+            ModTableRowKind::Summary => Color32::TRANSPARENT,
         };
         ui.painter().rect_filled(ui.max_rect(), 0.0, row_color);
 
-        let response = ui.interact(
-            ui.max_rect(),
-            ui.id().with(("mods_table_context_menu", row_nr)),
-            egui::Sense::click(),
-        );
-        self.attach_mod_context_menu(&response, row.mod_index);
+        if row.kind == ModTableRowKind::Summary {
+            let response = ui.interact(
+                ui.max_rect(),
+                ui.id().with(("mods_table_context_menu", row_nr)),
+                egui::Sense::click(),
+            );
+            self.attach_mod_context_menu(&response, row.mod_index);
+        }
     }
 
     fn cell_ui(&mut self, ui: &mut Ui, cell: &CellInfo) {
@@ -542,6 +694,7 @@ impl TableDelegate for ModsTableDelegate<'_> {
 
         match row.kind {
             ModTableRowKind::Summary => self.render_summary_cell(ui, cell.row_nr, column),
+            ModTableRowKind::File { .. } => self.render_file_cell(ui, row, column),
         }
     }
 
@@ -830,6 +983,7 @@ impl App {
     fn render_mods_table(&mut self, ui: &mut Ui) {
         let mods_count = self.mods.mods().len();
         self.state.mods_selected_indices.retain(|index| *index < mods_count);
+        self.state.mods_expanded_indices.retain(|index| *index < mods_count);
         if self.state.mods_selection_anchor.is_some_and(|index| index >= mods_count) {
             self.state.mods_selection_anchor = None;
         }
@@ -872,7 +1026,17 @@ impl App {
                 });
             }
 
-            filtered_mods.into_iter().map(ModTableRow::summary).collect::<Vec<_>>()
+            let mut rows = Vec::with_capacity(filtered_mods.len());
+            for mod_index in filtered_mods {
+                rows.push(ModTableRow::summary(mod_index));
+                if self.state.mods_expanded_indices.contains(&mod_index) {
+                    let file_count = mods[mod_index].files().len();
+                    rows.extend(
+                        (0..file_count).map(|file_index| ModTableRow::file(mod_index, file_index)),
+                    );
+                }
+            }
+            rows
         };
 
         let columns = self.mods_table_columns(ui);
@@ -892,6 +1056,7 @@ impl App {
             needs_save: &mut self.state.misc_needs_save,
             selected_mod_indices: &mut self.state.mods_selected_indices,
             selection_anchor: &mut self.state.mods_selection_anchor,
+            expanded_mod_indices: &mut self.state.mods_expanded_indices,
             sort_column: &mut self.state.mods_sort_column,
             sort_direction: &mut self.state.mods_sort_direction,
         };
@@ -950,6 +1115,7 @@ impl App {
                     &self.mods.mods()[row.mod_index],
                     name_width,
                 ),
+                ModTableRowKind::File { .. } => MODS_TABLE_FILE_ROW_HEIGHT,
             };
             next_top += height;
             row_tops.push(next_top);
