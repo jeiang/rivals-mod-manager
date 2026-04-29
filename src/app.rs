@@ -1,6 +1,7 @@
+use std::collections::HashMap;
+use std::f32;
 use std::path::PathBuf;
 use std::time::Duration;
-use std::{f32, io};
 
 use egui::{
     Align2,
@@ -27,7 +28,8 @@ use egui_toast::{Toast, ToastOptions, Toasts};
 use regex::Regex;
 
 use crate::categories::{CategoryMatcher, CategoryMatchers, default_matchers};
-use crate::mods::{ModInfo, ModList, refresh_mod_list};
+use crate::mods::{ModInfo, ModList, ModsRefreshResult, refresh_mods_with_nexusmods};
+use crate::nexusmods::CachedModInfo;
 use crate::settings::Settings;
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -40,6 +42,7 @@ pub struct App {
     state: State,
     categories: CategoryMatchers,
     mods: ModList,
+    nexusmods_mod_cache: HashMap<u32, CachedModInfo>,
 }
 
 #[derive(Default, PartialEq)]
@@ -77,7 +80,7 @@ pub struct State {
     categories_modal_matchers: Vec<String>,
     mods_category_filter: CategoryFilter,
     mods_name_filter: String,
-    mods_refresh_list: Bind<Vec<ModInfo>, io::Error>,
+    mods_refresh_list: Bind<ModsRefreshResult, String>,
     mods_sort_column: Option<ModSortColumn>,
     mods_sort_direction: SortDirection,
     misc_needs_save: bool,
@@ -100,6 +103,7 @@ impl Default for App {
             state: Default::default(),
             categories: default_matchers(),
             mods: Default::default(),
+            nexusmods_mod_cache: Default::default(),
         }
     }
 }
@@ -386,28 +390,70 @@ impl App {
                         .hint_text("Filter mods..."),
                 );
                 ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Apply Mods").clicked() {
+                    let is_refreshing = self.state.mods_refresh_list.is_pending();
+                    if ui.add_enabled(!is_refreshing, egui::Button::new("Apply Mods")).clicked() {
                         // TODO:
                     }
-                    if ui.button("Clear Mods").clicked() {
+                    if ui.add_enabled(!is_refreshing, egui::Button::new("Clear Mods")).clicked() {
                         // TODO:
                     }
-                    if ui.button("Refresh Mods").clicked() {
-                        let name = self.settings.input_folder().clone();
+                    if ui.add_enabled(!is_refreshing, egui::Button::new("Refresh Mods")).clicked() {
+                        let input_folder = self.settings.input_folder().clone();
                         let matchers = self.categories.clone();
-                        self.state
-                            .mods_refresh_list
-                            .request((|| async move { refresh_mod_list(&name, &matchers).await })());
+                        let api_key = self.settings.nexusmods_api_key().to_string();
+                        let nexusmods_mod_cache = self.nexusmods_mod_cache.clone();
+                        self.state.mods_refresh_list.request(async move {
+                            refresh_mods_with_nexusmods(
+                                input_folder,
+                                matchers,
+                                api_key,
+                                nexusmods_mod_cache,
+                            )
+                            .await
+                        });
                     }
                 });
             });
 
-            if let Some(Ok(modlist)) = self.state.mods_refresh_list.read() {
-                self.mods = ModList::new(modlist.to_vec());
+            if let Some(refresh_result) = self.state.mods_refresh_list.read().clone() {
+                match refresh_result {
+                    Ok(refresh_result) => {
+                        self.mods = ModList::new(refresh_result.mods);
+                        self.nexusmods_mod_cache = refresh_result.nexusmods_mod_cache;
+                        for error in refresh_result.toast_errors {
+                            self.add_error_toast(error);
+                        }
+                        self.state.misc_needs_save = true;
+                    }
+                    Err(err) => {
+                        self.add_error_toast(format!("Failed to refresh mods: {err}"));
+                    }
+                }
                 self.state.mods_refresh_list.clear();
             }
 
-            self.render_mods_table(ui);
+            if self.state.mods_refresh_list.is_pending() {
+                self.render_mods_loading(ui);
+            } else {
+                self.render_mods_table(ui);
+            }
+        });
+    }
+
+    fn render_mods_loading(&mut self, ui: &mut Ui) {
+        ui.allocate_ui(ui.available_size(), |ui| {
+            ui.centered_and_justified(|ui| {
+                ui.add(egui::Spinner::new().size(32.0));
+            });
+        });
+    }
+
+    fn add_error_toast(&mut self, text: impl Into<String>) {
+        self.state.toasts.add(Toast {
+            kind: egui_toast::ToastKind::Error,
+            text: text.into().into(),
+            options: ToastOptions::default().show_progress(true).duration_in_seconds(5.0),
+            ..Default::default()
         });
     }
 
@@ -424,7 +470,7 @@ impl App {
                     let category_matches = match &self.state.mods_category_filter {
                         CategoryFilter::None => true,
                         CategoryFilter::Category(cat) => mod_info.category() == cat,
-                        CategoryFilter::Uncategorized => mod_info.category().is_empty(),
+                        CategoryFilter::Uncategorized => mod_info.category() == "Uncategorized",
                     };
                     name_matches && category_matches
                 })
@@ -573,6 +619,15 @@ impl App {
                             .password(true)
                             .desired_width(ui.available_width()),
                     );
+                    ui.end_row();
+                    ui.label("NexusMods Cache:");
+                    ui.horizontal(|ui| {
+                        if ui.button("Clear Cache").clicked() {
+                            self.nexusmods_mod_cache.clear();
+                            self.state.misc_needs_save = true;
+                        }
+                        ui.label(format!("{} mods cached", self.nexusmods_mod_cache.len()));
+                    });
                     ui.end_row();
                     ui.label("Game Folder:").on_hover_ui(|ui| {
                         ui.label(format!(

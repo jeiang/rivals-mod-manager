@@ -25,6 +25,7 @@ futures-util = "0.3.32"
 lazy-regex = { version = "3.6.0", features = ["perf", "perf-cache", "perf-dfa", "perf-inline", "perf-literal", "regex", "std", "unicode", "unicode-age", "unicode-bool", "unicode-case", "unicode-gencat", "unicode-perl", "unicode-script", "unicode-segment"] }
 log = "0.4.27"
 regex = "1.12.3"
+reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls"] }
 rfd = "0.17.2"
 serde = { version = "1.0.219", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }

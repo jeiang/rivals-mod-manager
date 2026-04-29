@@ -1,12 +1,22 @@
+use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use async_walkdir::WalkDir;
 use chrono::{DateTime, Local};
 use futures_util::StreamExt as _;
 use lazy_regex::regex_captures;
 
-use crate::categories::{CategoryMatcher, match_category};
+use crate::categories::{CategoryMatcher, CategoryMatchers, match_category};
+use crate::nexusmods::{CachedModInfo, fetch_mod_info};
+
+#[derive(Clone)]
+pub struct ModsRefreshResult {
+    pub mods: Vec<ModInfo>,
+    pub nexusmods_mod_cache: HashMap<u32, CachedModInfo>,
+    pub toast_errors: Vec<String>,
+}
 
 #[derive(serde::Deserialize, serde::Serialize, Default)]
 pub struct ModList {
@@ -48,8 +58,16 @@ impl ModInfo {
         &self.name
     }
 
+    pub fn set_name(&mut self, name: String) {
+        self.name = name;
+    }
+
     pub fn author(&self) -> &str {
         &self.author
+    }
+
+    pub fn set_author(&mut self, author: String) {
+        self.author = author;
     }
 
     pub fn mod_id(&self) -> Option<u32> {
@@ -58,6 +76,10 @@ impl ModInfo {
 
     pub fn category(&self) -> &str {
         &self.category
+    }
+
+    pub fn set_category(&mut self, category: String) {
+        self.category = category;
     }
 
     pub fn last_modified(&self) -> &str {
@@ -133,6 +155,71 @@ pub async fn refresh_mod_list(
         list.push(modinfo);
     }
     Ok(list)
+}
+
+pub async fn refresh_mods_with_nexusmods(
+    input_folder: PathBuf,
+    matchers: CategoryMatchers,
+    api_key: String,
+    mut nexusmods_mod_cache: HashMap<u32, CachedModInfo>,
+) -> Result<ModsRefreshResult, String> {
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let mut mods =
+        refresh_mod_list(&input_folder, &matchers).await.map_err(|err| err.to_string())?;
+    let mut toast_errors = vec![];
+
+    let api_key = api_key.trim();
+    if api_key.is_empty() {
+        toast_errors.push("NexusMods API key is not set.".to_string());
+    }
+
+    for mod_info in &mut mods {
+        let Some(mod_id) = mod_info.mod_id() else {
+            continue;
+        };
+
+        if !api_key.is_empty() {
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                nexusmods_mod_cache.entry(mod_id)
+            {
+                match fetch_mod_info(&api_key, "marvelrivals", mod_id).await {
+                    Ok(fetched_mod_info) => {
+                        entry.insert(fetched_mod_info);
+                    }
+                    Err(err) => {
+                        if matches!(
+                            err.status(),
+                            Some(
+                                reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+                            )
+                        ) {
+                            toast_errors.push(
+                                "NexusMods API key is invalid. Check the key in Settings."
+                                    .to_string(),
+                            );
+                            break;
+                        }
+
+                        toast_errors.push(format!(
+                            "NexusMods metadata was not found for {} ({mod_id}): {err}",
+                            mod_info.name()
+                        ));
+                    }
+                }
+            }
+        }
+
+        if let Some(fetched_mod_info) = nexusmods_mod_cache.get(&mod_id) {
+            mod_info.set_name(fetched_mod_info.name().to_string());
+            mod_info.set_author(fetched_mod_info.author().to_string());
+            if mod_info.category() == "Uncategorized" {
+                mod_info.set_category(match_category(&matchers, fetched_mod_info.name()));
+            }
+        }
+    }
+
+    Ok(ModsRefreshResult { mods, nexusmods_mod_cache, toast_errors })
 }
 
 // pub fn merge_and_sort_mods(prev: Vec<ModInfo>, next: Vec<ModInfo>) {}
