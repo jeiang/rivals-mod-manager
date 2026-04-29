@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::f32;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -83,6 +83,8 @@ pub struct State {
     mods_refresh_list: Bind<ModsRefreshResult, String>,
     mods_sort_column: Option<ModSortColumn>,
     mods_sort_direction: SortDirection,
+    mods_selected_indices: BTreeSet<usize>,
+    mods_selection_anchor: Option<usize>,
     mods_edit_modal: Option<ModEditModal>,
     misc_needs_save: bool,
 }
@@ -102,6 +104,8 @@ impl Default for State {
             mods_refresh_list: Default::default(),
             mods_sort_column: Some(ModSortColumn::Name),
             mods_sort_direction: SortDirection::Ascending,
+            mods_selected_indices: Default::default(),
+            mods_selection_anchor: Default::default(),
             mods_edit_modal: Default::default(),
             misc_needs_save: Default::default(),
         }
@@ -119,9 +123,9 @@ pub enum Page {
 #[derive(Clone)]
 enum ModEditModal {
     Rename { mod_index: usize, name: String },
-    ChangeAuthor { mod_index: usize, author: String },
+    ChangeAuthor { mod_indices: Vec<usize>, author: String },
     SetModId { mod_index: usize, mod_id: String },
-    ChooseCategory { mod_index: usize, category: String },
+    ChooseCategory { mod_indices: Vec<usize>, category: String },
 }
 
 impl Default for App {
@@ -226,7 +230,8 @@ enum ModTableRowKind {
 
 #[derive(Debug, Clone)]
 struct ModContextMenuData {
-    mod_index: usize,
+    clicked_mod_index: usize,
+    mod_indices: Vec<usize>,
     name: String,
     author: String,
     mod_id: String,
@@ -237,9 +242,13 @@ struct ModsTableDelegate<'a> {
     mods: &'a mut [ModInfo],
     rows: Vec<ModTableRow>,
     row_tops: Vec<f32>,
+    selection_handled_mod_indices: BTreeSet<usize>,
+    context_menu_handled_mod_indices: BTreeSet<usize>,
     categories: &'a CategoryMatchers,
     edit_modal: &'a mut Option<ModEditModal>,
     needs_save: &'a mut bool,
+    selected_mod_indices: &'a mut BTreeSet<usize>,
+    selection_anchor: &'a mut Option<usize>,
     sort_column: &'a mut Option<ModSortColumn>,
     sort_direction: &'a mut SortDirection,
 }
@@ -254,10 +263,33 @@ impl ModsTableDelegate<'_> {
         self.mods.get_mut(row.mod_index)
     }
 
+    fn visible_mod_range(
+        &self,
+        start_mod_index: usize,
+        end_mod_index: usize,
+    ) -> Option<Vec<usize>> {
+        let start = self.rows.iter().position(|row| row.mod_index == start_mod_index)?;
+        let end = self.rows.iter().position(|row| row.mod_index == end_mod_index)?;
+        let (from, to) = if start <= end { (start, end) } else { (end, start) };
+
+        Some(self.rows[from..=to].iter().map(|row| row.mod_index).collect())
+    }
+
     fn mod_context_menu_data(&self, mod_index: usize) -> Option<ModContextMenuData> {
         let mod_info = self.mods.get(mod_index)?;
+        let mod_indices = if self.selected_mod_indices.contains(&mod_index) {
+            self.selected_mod_indices
+                .iter()
+                .copied()
+                .filter(|index| *index < self.mods.len())
+                .collect()
+        } else {
+            vec![mod_index]
+        };
+
         Some(ModContextMenuData {
-            mod_index,
+            clicked_mod_index: mod_index,
+            mod_indices,
             name: mod_info.name().to_string(),
             author: mod_info.author().to_string(),
             mod_id: mod_info.mod_id().map(|id| id.to_string()).unwrap_or_default(),
@@ -265,40 +297,107 @@ impl ModsTableDelegate<'_> {
         })
     }
 
-    fn attach_mod_context_menu(&mut self, response: &egui::Response, data: ModContextMenuData) {
+    fn handle_mod_row_response(&mut self, response: &egui::Response, mod_index: usize) -> bool {
+        if response.clicked_by(egui::PointerButton::Primary) {
+            if self.selection_handled_mod_indices.insert(mod_index) {
+                let modifiers = response.ctx.input(|input| input.modifiers);
+                let toggle_selection = modifiers.command || modifiers.ctrl;
+
+                if modifiers.shift {
+                    let anchor = if let Some(anchor) = *self.selection_anchor {
+                        anchor
+                    } else {
+                        *self.selection_anchor = Some(mod_index);
+                        mod_index
+                    };
+                    if let Some(range) = self.visible_mod_range(anchor, mod_index) {
+                        if !toggle_selection {
+                            self.selected_mod_indices.clear();
+                        }
+                        self.selected_mod_indices.extend(range);
+                    } else {
+                        if !toggle_selection {
+                            self.selected_mod_indices.clear();
+                        }
+                        self.selected_mod_indices.insert(mod_index);
+                        *self.selection_anchor = Some(mod_index);
+                    }
+                } else if toggle_selection {
+                    if !self.selected_mod_indices.remove(&mod_index) {
+                        self.selected_mod_indices.insert(mod_index);
+                    }
+                    *self.selection_anchor = Some(mod_index);
+                } else {
+                    self.selected_mod_indices.clear();
+                    self.selected_mod_indices.insert(mod_index);
+                    *self.selection_anchor = Some(mod_index);
+                }
+            }
+        }
+
+        if response.secondary_clicked() {
+            if !self.context_menu_handled_mod_indices.insert(mod_index) {
+                return false;
+            }
+            if !self.selected_mod_indices.contains(&mod_index) {
+                self.selected_mod_indices.clear();
+                self.selected_mod_indices.insert(mod_index);
+                *self.selection_anchor = Some(mod_index);
+            }
+        }
+
+        true
+    }
+
+    fn attach_mod_context_menu(&mut self, response: &egui::Response, mod_index: usize) {
+        if !self.handle_mod_row_response(response, mod_index) {
+            return;
+        }
+
+        let Some(data) = self.mod_context_menu_data(mod_index) else {
+            return;
+        };
+        let selected_count = data.mod_indices.len();
+
         response.context_menu(|ui| {
-            if ui.button("Rename mod").clicked() {
-                *self.edit_modal = Some(ModEditModal::Rename {
-                    mod_index: data.mod_index,
-                    name: data.name.clone(),
-                });
-                ui.close();
+            if selected_count == 1 {
+                if ui.button("Rename mod").clicked() {
+                    *self.edit_modal = Some(ModEditModal::Rename {
+                        mod_index: data.clicked_mod_index,
+                        name: data.name.clone(),
+                    });
+                    ui.close();
+                }
             }
             if ui.button("Change author").clicked() {
                 *self.edit_modal = Some(ModEditModal::ChangeAuthor {
-                    mod_index: data.mod_index,
+                    mod_indices: data.mod_indices.clone(),
                     author: data.author.clone(),
                 });
                 ui.close();
             }
-            if ui.button("Set mod id").clicked() {
-                *self.edit_modal = Some(ModEditModal::SetModId {
-                    mod_index: data.mod_index,
-                    mod_id: data.mod_id.clone(),
-                });
-                ui.close();
+            if selected_count == 1 {
+                if ui.button("Set mod id").clicked() {
+                    *self.edit_modal = Some(ModEditModal::SetModId {
+                        mod_index: data.clicked_mod_index,
+                        mod_id: data.mod_id.clone(),
+                    });
+                    ui.close();
+                }
             }
             if ui.button("Choose category").clicked() {
                 *self.edit_modal = Some(ModEditModal::ChooseCategory {
-                    mod_index: data.mod_index,
+                    mod_indices: data.mod_indices.clone(),
                     category: data.category.clone(),
                 });
                 ui.close();
             }
             if ui.button("Reset to default").clicked() {
-                if let Some(mod_info) = self.mods.get_mut(data.mod_index) {
-                    mod_info.reset_to_default(self.categories);
-                    *self.needs_save = true;
+                for mod_index in data.mod_indices.iter().copied() {
+                    if let Some(mod_info) = self.mods.get_mut(mod_index) {
+                        mod_info.reset_to_default(self.categories);
+                        *self.needs_save = true;
+                    }
                 }
                 ui.close();
             }
@@ -358,10 +457,6 @@ impl ModsTableDelegate<'_> {
             };
             let mod_index = row.mod_index;
 
-            let Some(data) = self.mod_context_menu_data(mod_index) else {
-                return;
-            };
-
             let Some(mod_info) = self.mods.get_mut(mod_index) else {
                 return;
             };
@@ -396,7 +491,7 @@ impl ModsTableDelegate<'_> {
                 }
             };
 
-            self.attach_mod_context_menu(&response, data);
+            self.attach_mod_context_menu(&response, mod_index);
         });
     }
 
@@ -416,24 +511,25 @@ impl TableDelegate for ModsTableDelegate<'_> {
     }
 
     fn row_ui(&mut self, ui: &mut Ui, row_nr: u64) {
-        let row_color =
-            if row_nr % 2 == 0 { ui.visuals().extreme_bg_color } else { Color32::TRANSPARENT };
-        ui.painter().rect_filled(ui.max_rect(), 0.0, row_color);
-
         let Some(row) = self.row(row_nr) else {
             return;
         };
 
-        let Some(data) = self.mod_context_menu_data(row.mod_index) else {
-            return;
+        let row_color = if self.selected_mod_indices.contains(&row.mod_index) {
+            ui.visuals().selection.bg_fill
+        } else if row_nr % 2 == 0 {
+            ui.visuals().extreme_bg_color
+        } else {
+            Color32::TRANSPARENT
         };
+        ui.painter().rect_filled(ui.max_rect(), 0.0, row_color);
 
         let response = ui.interact(
             ui.max_rect(),
             ui.id().with(("mods_table_context_menu", row_nr)),
             egui::Sense::click(),
         );
-        self.attach_mod_context_menu(&response, data);
+        self.attach_mod_context_menu(&response, row.mod_index);
     }
 
     fn cell_ui(&mut self, ui: &mut Ui, cell: &CellInfo) {
@@ -601,8 +697,12 @@ impl App {
                         true
                     });
                 }
-                ModEditModal::ChangeAuthor { mod_index, author } => {
-                    ui.heading("Change Author");
+                ModEditModal::ChangeAuthor { mod_indices, author } => {
+                    ui.heading(if mod_indices.len() == 1 {
+                        "Change Author"
+                    } else {
+                        "Change Authors"
+                    });
                     let existing_authors = self.existing_mod_authors();
                     let available_width = ui.available_width();
                     ui.add(
@@ -616,9 +716,11 @@ impl App {
                             }),
                     );
                     self.render_mod_edit_actions(ui, &mut keep_open, |app| {
-                        if let Some(mod_info) = app.mods.mods_mut().get_mut(*mod_index) {
-                            mod_info.set_author(author.trim().to_string());
-                            app.state.misc_needs_save = true;
+                        for mod_index in mod_indices.iter().copied() {
+                            if let Some(mod_info) = app.mods.mods_mut().get_mut(mod_index) {
+                                mod_info.set_author(author.trim().to_string());
+                                app.state.misc_needs_save = true;
+                            }
                         }
                         true
                     });
@@ -647,8 +749,12 @@ impl App {
                         true
                     });
                 }
-                ModEditModal::ChooseCategory { mod_index, category } => {
-                    ui.heading("Choose Category");
+                ModEditModal::ChooseCategory { mod_indices, category } => {
+                    ui.heading(if mod_indices.len() == 1 {
+                        "Choose Category"
+                    } else {
+                        "Choose Categories"
+                    });
                     egui::ComboBox::from_id_salt("mod_category_picker")
                         .selected_text(category.as_str())
                         .show_ui(ui, |ui| {
@@ -666,9 +772,11 @@ impl App {
                             }
                         });
                     self.render_mod_edit_actions(ui, &mut keep_open, |app| {
-                        if let Some(mod_info) = app.mods.mods_mut().get_mut(*mod_index) {
-                            mod_info.set_category(category.clone());
-                            app.state.misc_needs_save = true;
+                        for mod_index in mod_indices.iter().copied() {
+                            if let Some(mod_info) = app.mods.mods_mut().get_mut(mod_index) {
+                                mod_info.set_category(category.clone());
+                                app.state.misc_needs_save = true;
+                            }
                         }
                         true
                     });
@@ -720,6 +828,12 @@ impl App {
     }
 
     fn render_mods_table(&mut self, ui: &mut Ui) {
+        let mods_count = self.mods.mods().len();
+        self.state.mods_selected_indices.retain(|index| *index < mods_count);
+        if self.state.mods_selection_anchor.is_some_and(|index| index >= mods_count) {
+            self.state.mods_selection_anchor = None;
+        }
+
         let rows = {
             let mods = self.mods.mods();
             let name_filter = self.state.mods_name_filter.to_lowercase();
@@ -771,9 +885,13 @@ impl App {
             mods: self.mods.mods_mut(),
             rows,
             row_tops,
+            selection_handled_mod_indices: Default::default(),
+            context_menu_handled_mod_indices: Default::default(),
             categories: &self.categories,
             edit_modal: &mut self.state.mods_edit_modal,
             needs_save: &mut self.state.misc_needs_save,
+            selected_mod_indices: &mut self.state.mods_selected_indices,
+            selection_anchor: &mut self.state.mods_selection_anchor,
             sort_column: &mut self.state.mods_sort_column,
             sort_direction: &mut self.state.mods_sort_direction,
         };
