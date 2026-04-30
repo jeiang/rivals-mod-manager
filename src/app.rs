@@ -178,6 +178,10 @@ const fn game_path() -> &'static str {
     {
         "$HOME/.local/share/Steam/steamapps/common/MarvelRivals"
     }
+    #[cfg(target_os = "macos")]
+    {
+        "$HOME/Library/Application Support/Steam/steamapps/common/MarvelRivals"
+    }
 }
 
 const MODS_TABLE_ID: &str = "mods_table";
