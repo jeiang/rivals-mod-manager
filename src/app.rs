@@ -883,7 +883,7 @@ impl App {
 
             ui.label("How to use mods");
             ui.label("Put each mod in its own folder inside the input folder, then click Refresh Mods.");
-            ui.label("Enable the mod files you want, then click Apply Mods to symlink them into the game's ~mods folder.");
+            ui.label("Enable the mod files you want, then click Apply Mods to link them into the game's ~mods folder.");
             ui.label("Click Clear Mods to remove the applied links from the game's ~mods folder.");
             ui.separator();
 

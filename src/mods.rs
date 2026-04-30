@@ -364,7 +364,7 @@ pub fn apply_mods(game_folder: &Path, mods: &[ModInfo]) -> io::Result<()> {
                     std::fs::create_dir_all(parent)?;
                 }
 
-                symlink_file(&source, &destination)?;
+                link_file(&source, &destination)?;
             }
         }
     }
@@ -429,13 +429,13 @@ fn files_to_link_for_pak(pak_path: &Path) -> io::Result<Vec<PathBuf>> {
 }
 
 #[cfg(unix)]
-fn symlink_file(source: &Path, destination: &Path) -> io::Result<()> {
+fn link_file(source: &Path, destination: &Path) -> io::Result<()> {
     std::os::unix::fs::symlink(source, destination)
 }
 
 #[cfg(windows)]
-fn symlink_file(source: &Path, destination: &Path) -> io::Result<()> {
-    std::os::windows::fs::symlink_file(source, destination)
+fn link_file(source: &Path, destination: &Path) -> io::Result<()> {
+    std::fs::hard_link(source, destination)
 }
 
 struct NameParseResult {
