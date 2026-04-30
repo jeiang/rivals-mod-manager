@@ -354,13 +354,18 @@ pub fn apply_mods(game_folder: &Path, mods: &[ModInfo]) -> io::Result<()> {
     for mod_info in mods {
         for file_info in mod_info.files().iter().filter(|file_info| file_info.enabled()) {
             let source = mod_info.path.join(file_info.subpath());
-            let destination = game_mods_folder(game_folder).join(file_info.subpath());
+            for source in files_to_link_for_pak(&source)? {
+                let Ok(subpath) = source.strip_prefix(&mod_info.path) else {
+                    continue;
+                };
+                let destination = game_mods_folder(game_folder).join(subpath);
 
-            if let Some(parent) = destination.parent() {
-                std::fs::create_dir_all(parent)?;
+                if let Some(parent) = destination.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+
+                symlink_file(&source, &destination)?;
             }
-
-            symlink_file(&source, &destination)?;
         }
     }
 
@@ -389,6 +394,38 @@ pub fn clear_mods(game_folder: &Path) -> io::Result<()> {
 
 fn game_mods_folder(game_folder: &Path) -> PathBuf {
     GAME_MODS_SUBPATH.iter().fold(game_folder.to_path_buf(), |path, component| path.join(component))
+}
+
+fn files_to_link_for_pak(pak_path: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut files = vec![pak_path.to_path_buf()];
+    let Some(parent) = pak_path.parent() else {
+        return Ok(files);
+    };
+    let Some(stem) = pak_path.file_stem() else {
+        return Ok(files);
+    };
+
+    for entry in std::fs::read_dir(parent)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+
+        let path = entry.path();
+        if path == pak_path {
+            continue;
+        }
+
+        let same_stem = path.file_stem().is_some_and(|path_stem| path_stem == stem);
+        let sidecar_extension = path.extension().is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("ucas") || extension.eq_ignore_ascii_case("utoc")
+        });
+        if same_stem && sidecar_extension {
+            files.push(path);
+        }
+    }
+
+    Ok(files)
 }
 
 #[cfg(unix)]
