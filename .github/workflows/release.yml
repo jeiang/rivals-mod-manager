@@ -8,6 +8,9 @@ on:
 permissions:
   contents: write
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   build:
     name: Build ${{ matrix.name }}
@@ -24,14 +27,14 @@ jobs:
             os: windows-latest
             archive: rivals-mod-manager-windows-x86_64.zip
             executable: rivals-mod-manager.exe
-          - name: macos-x86_64
-            os: macos-13
-            archive: rivals-mod-manager-macos-x86_64.tar.gz
+          - name: macos-arm64
+            os: macos-latest
+            archive: rivals-mod-manager-macos-arm64.tar.gz
             executable: rivals-mod-manager
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
@@ -61,10 +64,11 @@ jobs:
           Compress-Archive -Path "dist/${{ matrix.executable }}" -DestinationPath "${{ matrix.archive }}"
 
       - name: Upload Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.name }}
           path: ${{ matrix.archive }}
+          if-no-files-found: error
 
   release:
     name: Publish Release
@@ -72,12 +76,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download Artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           path: release-assets
           merge-multiple: true
 
       - name: Upload Release Asset
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: release-assets/*
