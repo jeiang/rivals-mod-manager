@@ -1,0 +1,78 @@
+# UI stack survey for the rewrite
+
+Research for issue #3. Fact sheets only; the decision is issue #7.
+
+Scope: a Windows/macOS/Linux desktop app with the domain logic staying in Rust. Dimensions per candidate: platform maturity/parity, rich table/list UI (drag-drop reordering, collapsible sections), image previews, custom URL protocol (`nxm://`) registration, self-update, binary size/runtime deps, Rust interop. All claims cite primary sources (official docs, repos, release notes), accessed 2026-08-30.
+
+---
+
+## Tauri v2
+
+- **Maturity/parity.** 2.0 stable since October 2, 2024; targets Windows, macOS, Linux plus iOS/Android from one codebase ([Tauri 2.0 announcement](https://v2.tauri.app/blog/tauri-20/)). Desktop parity is high because the UI is a webview; per-platform differences surface mainly in the webview engine (see runtime deps).
+- **Table/list UI.** The UI is HTML/CSS/JS, so tables, drag-drop reordering, and collapsible sections are whatever the chosen web stack provides. Caveat: Tauri's native drag-drop handler is on by default and intercepts OS file drops before the DOM sees them; `dragDropEnabled: false` is required to use HTML5 drag-and-drop on Windows ([config reference](https://v2.tauri.app/reference/config/), [tauri#14373](https://github.com/tauri-apps/tauri/issues/14373)).
+- **Images.** Standard web `<img>`/CSS; local files are served to the webview via the asset protocol.
+- **`nxm://` registration.** First-party [deep-link plugin](https://v2.tauri.app/plugin/deep-linking/) supports Windows/macOS/Linux. Windows/Linux allow both static config and runtime `register()`; macOS requires the scheme in the bundle config and only works from an installed app in `/Applications`. AppImage caveat: moving the AppImage invalidates the registration (absolute path in the handler). Optional single-instance plugin integration routes a second launch's URL into the running app.
+- **Self-update.** First-party [updater plugin](https://v2.tauri.app/plugin/updater/) for Windows (MSI/NSIS), macOS (`.app.tar.gz`), Linux (AppImage only). Signature verification is mandatory and cannot be disabled; on Windows the app exits during install (installer limitation).
+- **Size/runtime deps.** Uses the OS webview, "the size of a Tauri app can be little as 600KB" ([tauri.app](https://tauri.app/)); official size-reduction guide adds LTO/strip and `removeUnusedCommands` (Tauri ≥ 2.4) ([App Size concept](https://v2.tauri.app/concept/size/)). Runtime deps: WebView2 (preinstalled on Windows 10 1803+), WKWebView (ships with macOS), `webkit2gtk-4.1` on Linux via the distro package manager ([prerequisites](https://v2.tauri.app/start/prerequisites/)).
+- **Rust interop.** Backend *is* Rust: `#[tauri::command]` + `invoke()` with typed args/returns, async commands, events (`emit`/`listen`), channels for streaming, and raw binary payloads ([Calling Rust from the Frontend](https://v2.tauri.app/develop/calling-rust/)). The frontend layer itself is JS/TS (or Rust via a WASM framework).
+
+## iced (incl. webview embedding via wry)
+
+- **Maturity/parity.** Runs on Windows, macOS, Linux (and web); renderers: `iced_wgpu` (Vulkan/Metal/DX12) with `iced_tiny_skia` software fallback. The README labels the project "currently experimental software" ([iced README](https://github.com/iced-rs/iced)). Latest release 0.14.0 (December 2025): reactive rendering, animation API, headless/end-to-end testing, hot reloading ([releases](https://github.com/iced-rs/iced/releases)).
+- **Table/list UI.** 0.14 added first-party `table` and `grid` widgets ([0.14 release notes](https://github.com/iced-rs/iced/releases)); scrollables and custom widgets are built in. Drag-drop reordering has no first-class API; community crates implement it ([iced_drop](https://github.com/jhannyj/iced_drop), [iced_aw extra widgets](https://github.com/iced-rs/iced_aw)). Collapsible sections are hand-rolled from the layout primitives or ecosystem widgets.
+- **Images.** Built-in `image` widget backed by the `image` crate (README feature list).
+- **`nxm://` registration.** Nothing built in. Scheme registration is manual per platform (Windows registry keys, macOS `CFBundleURLTypes` in the bundle plist, Linux `.desktop` `MimeType=x-scheme-handler/...`), plus hand-rolled single-instance URL forwarding.
+- **Self-update.** Nothing built in. Framework-agnostic Rust tooling exists: [cargo-packager](https://github.com/crabnebula-dev/cargo-packager) (NSIS/MSI, DMG/.app, deb/AppImage/pacman) ships a compatible updater (`cargo-packager-updater`); [Velopack](https://github.com/velopack/velopack) is language-agnostic with Rust support.
+- **Size/runtime deps.** Statically linked Rust binary; no bundled browser engine and no system webview requirement. GPU rendering wants working Vulkan/Metal/DX12 drivers, with tiny-skia as the CPU fallback ([iced README](https://github.com/iced-rs/iced)). No official size figures published.
+- **Rust interop.** Native: the whole app is Rust (Elm-style state/message/view/update), so the domain core is called directly with no IPC boundary ([iced README](https://github.com/iced-rs/iced)).
+- **Webview embedding.** iced has no official webview widget. [`iced_webview`](https://github.com/LegitCamper/iced_webview) exists but "currently this library only supports Ultralight/Webkit" (i.e. not wry) per its README. wry itself creates OS webviews as windows/child views rather than composited iced widgets, so mixing iced widgets and web content in one scene is not an off-the-shelf capability.
+
+## Slint
+
+- **Maturity/parity.** Stable 1.x API; Windows/macOS/Linux (plus embedded, mobile, wasm); Rust, C++, JS (beta), Python (beta) APIs; femtovg (GL), Skia, and software renderers ([Slint README](https://github.com/slint-ui/slint)). Latest: 1.17, June 24, 2026 ([release blog](https://slint.dev/blog/slint-1.17-released)). Desktop focus is recent: the [Making Slint Desktop-Ready blog](https://slint.dev/blog/making-slint-desktop-ready) lists gaps being worked (rich text, modal dialogs, popup positioning, tooltips, tray icons, cross-window drag-drop pending winit work).
+- **Licensing.** Choice of GPLv3, royalty-free license, or commercial. The royalty-free license covers proprietary desktop/mobile/web apps but requires attribution (the `AboutSlint` widget in an about/splash screen, or a badge on the download page) and excludes embedded ([Royalty-Free 2.0 license](https://github.com/slint-ui/slint/blob/master/LICENSES/LicenseRef-Slint-Royalty-free-2.0.md)).
+- **Table/list UI.** `ListView` with `for` loops, `StandardListView`, and `StandardTableView` (columns/rows models, row selection, sort callbacks) in std-widgets ([StandardTableView docs](https://docs.slint.dev/latest/docs/slint/reference/std-widgets/views/standardtableview/)). Declarative in-window drag-and-drop landed in 1.17 via `DragArea`/`DropArea` with a data-transfer payload ([1.17 release blog](https://slint.dev/blog/slint-1.17-released)); reorderable-by-drag lists are assembled from these, not a stock widget. Collapsible sections are built from primitives (no stock expander in std-widgets).
+- **Images.** `Image` element with `@image-url()` (compile-time embedding), data URIs, fill/contain/cover modes ([Image element docs](https://docs.slint.dev/latest/docs/slint/reference/elements/image/)); runtime loading from Rust via `slint::Image`.
+- **`nxm://` registration.** Nothing built in; same manual per-platform registration as iced.
+- **Self-update.** Nothing built in; cargo-packager (its examples include Slint) or Velopack, as above.
+- **Size/runtime deps.** Compiled Rust binary, no webview; designed to scale down to microcontrollers ([README](https://github.com/slint-ui/slint)). Renderer needs OpenGL ES 2.0 (femtovg) or Skia, with a CPU software renderer as fallback. No official desktop size figures.
+- **Rust interop.** Native. UI is written in the `.slint` DSL compiled into Rust; Rust-first API for models, callbacks, and properties ([README](https://github.com/slint-ui/slint)).
+
+## GPUI-CE
+
+- **Maturity/parity.** [GPUI-CE](https://github.com/gpui-ce/gpui-ce) is "a community fork of GPUI, Zed's GPU-accelerated UI framework," published as `gpui-ce` (0.3 on crates.io), Apache-2.0, positioned as a drop-in replacement usable via a Cargo patch block; it self-describes as still "limited by mainline Zed" for now. Upstream gpui supports macOS (Metal), Linux/FreeBSD (Vulkan-class rendering, Wayland/X11), and Windows (Win32/DirectWrite), and states it is "still pre-1.0. There will often be breaking changes between versions" ([gpui README](https://github.com/zed-industries/zed/tree/main/crates/gpui)). Platform proof point: Zed 1.0 shipped stable for Linux/macOS/Windows on April 29, 2026 ([zed.dev releases](https://zed.dev/releases/stable)). Docs are acknowledged incomplete; the README points to Zed source and Discord as the main learning resources.
+- **Table/list UI.** Bare gpui provides elements, not a widget kit. The Apache-2.0 [gpui-component](https://github.com/longbridge/gpui-component) library layers 60+ components on top: virtualized Table (fixed/resizable columns, sorting, cell selection), virtualized List, dock layout with draggable tabs, accordion-style components; it drives the shipping Longbridge Pro app. Drag-reorder of list rows is assembled from gpui's drag primitives rather than a stock "sortable list."
+- **Images.** gpui renders images via its `img` element (used throughout Zed); gpui-component includes image/icon components.
+- **`nxm://` registration.** Nothing built in; manual per-platform registration as with iced/Slint.
+- **Self-update.** Nothing built in (Zed's updater is Zed-specific); cargo-packager or Velopack apply.
+- **Size/runtime deps.** Statically linked Rust binary, no webview. Requires a GPU: Metal on macOS, Vulkan-capable drivers on Linux, DirectX-class on Windows ([gpui README](https://github.com/zed-industries/zed/tree/main/crates/gpui)). No official size figures.
+- **Rust interop.** Native Rust throughout (`Application`, `open_window`, entities implementing `Render`) ([gpui-ce README](https://github.com/gpui-ce/gpui-ce)).
+
+## Electron
+
+- **Maturity/parity.** The most battle-tested of the set; first-class Windows/macOS/Linux with near-total parity since the UI is Chromium. Main process runs Node.js; each renderer is a Chromium web page ([process model docs](https://www.electronjs.org/docs/latest/tutorial/process-model)).
+- **Table/list UI.** Full web platform: any JS table/virtual-list/dnd/accordion library.
+- **Images.** Standard web rendering.
+- **`nxm://` registration.** `app.setAsDefaultProtocolClient()` on Windows (registry) and macOS (scheme must be pre-declared in `Info.plist`; app should be signed/notarized); not supported on Linux, where packagers register the scheme via `.desktop` `MimeType` entries ([app API docs](https://www.electronjs.org/docs/latest/api/app), [deep links tutorial](https://www.electronjs.org/docs/latest/tutorial/launch-app-from-url-in-another-app)). URL delivery: `open-url` event on macOS, `second-instance` + `requestSingleInstanceLock()` on Windows/Linux; works only in packaged builds.
+- **Self-update.** Built-in `autoUpdater` (Squirrel) covers macOS and Windows only; free hosted update.electronjs.org requires a public GitHub repo and macOS code signing ([updates tutorial](https://www.electronjs.org/docs/latest/tutorial/updates)). The third-party [electron-updater](https://www.electron.build/docs/features/auto-update/) (electron-builder) adds Linux AppImage/deb/rpm plus differential updates.
+- **Size/runtime deps.** Each app bundles Chromium + Node.js. The Electron v44.0.0 runtime zips alone are ~117-150 MB compressed per platform (e.g. `electron-v44.0.0-win32-x64.zip` = 157,455,369 bytes) ([electron releases](https://github.com/electron/electron/releases)). No system webview dependency.
+- **Rust interop.** Not native. Options: compile the Rust core as a Node native addon via [napi-rs](https://napi.rs/) (pre-compiled Node addons in Rust; used by SWC, Prisma, Polars, Next.js), or run it as a sidecar binary over IPC. Either way there is a JS/TS layer and an FFI or process boundary between UI and core.
+
+## Avalonia
+
+- **Maturity/parity.** Mature .NET (C#/XAML) framework with tiered support: Tier 1 = Windows 11 (x64/ARM64), macOS 26, Ubuntu 25.x/Fedora 43/Debian 13; Windows 10 22H2 and macOS 14-15 are Tier 2 "best effort." Linux uses X11 by default; Wayland support is experimental. Desktop targets need .NET 8+ ([supported platforms](https://docs.avaloniaui.net/docs/overview/supported-platforms)).
+- **Table/list UI.** Stock `ListBox`/`TreeView`/`Expander` (collapsible) controls; pointer-driven drag-drop via `DragDrop.DoDragDropAsync` + `AllowDrop` with DragEnter/DragOver/Drop events, including a how-to for dragging items between lists ([drag and drop docs](https://docs.avaloniaui.net/docs/input-interaction/drag-and-drop)). Caveat: the hierarchical [TreeDataGrid](https://github.com/AvaloniaUI/Avalonia.Controls.TreeDataGrid) repo was archived October 13, 2025 and the control moved to the commercial "Avalonia Accelerate" offering.
+- **Images.** `Image` control with `Bitmap` sources; Skia-based rendering across platforms.
+- **`nxm://` registration.** Nothing built in; manual per-platform registration (registry / `Info.plist` / `.desktop`), same as the Rust-native toolkits.
+- **Self-update.** No first-party updater. [Velopack](https://github.com/velopack/velopack) (install + auto-update framework, Windows/macOS/Linux, C# among its first-class languages, delta updates) is the common companion.
+- **Size/runtime deps.** Requires the .NET runtime; self-contained publishing bundles it. NativeAOT is fully supported, giving self-contained executables with faster startup and "smaller distribution size when combined with trimming" (no official numbers; reflection/trimming caveats apply) ([Native AOT docs](https://docs.avaloniaui.net/docs/deployment/native-aot)). Linux rendering builds Skia against glibc 2.17 ([supported platforms](https://docs.avaloniaui.net/docs/overview/supported-platforms)).
+- **Rust interop.** Not native: the app layer is C#/.NET. A Rust core means exposing a C ABI consumed via [P/Invoke](https://learn.microsoft.com/en-us/dotnet/standard/native-interop/pinvoke) (or a sidecar process), i.e. an FFI boundary and a second language in the codebase.
+
+---
+
+## Cross-cutting notes
+
+- Only Tauri (deep-link, updater plugins) and Electron (`setAsDefaultProtocolClient`, `autoUpdater`/electron-updater) have first-party or de-facto-standard answers for `nxm://` handling and self-update. iced/Slint/GPUI-CE/Avalonia all need manual scheme registration; for updates, cargo-packager's updater and Velopack are the framework-agnostic options (Velopack explicitly supports both Rust and C#).
+- Only iced, Slint, and GPUI-CE keep the entire app in Rust with zero IPC/FFI boundary to the domain core. Tauri keeps the core in Rust behind a typed IPC layer to a JS/TS frontend. Electron and Avalonia put the UI in another runtime (Node/Chromium, .NET) with FFI or sidecar interop.
+- Runtime-dependency spectrum: Electron bundles its engine (~117-150 MB runtime per platform); Tauri depends on the system webview (only Linux needs a package installed); iced/Slint/GPUI-CE/Avalonia render themselves (GPU drivers, and .NET for Avalonia unless NativeAOT/self-contained).
+- Maturity self-descriptions differ sharply: iced says "experimental," gpui says "pre-1.0, breaking changes often," Slint has a stable 1.x API but is still closing desktop-specific gaps, while Tauri, Electron, and Avalonia are shipping stable major versions with commercial users.
