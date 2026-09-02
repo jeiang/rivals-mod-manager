@@ -8,7 +8,8 @@ extracted mod content, deployed into the game's `~mods` folder per an active Pro
 **Download**:
 A file in `downloads/` — the archive as retrieved (from NexusMods or elsewhere). Carries an
 md5 for identification and, when known, its NexusMods `(mod_id, file_id)`. One Download can
-produce more than one Mod (a multi-mod archive is split by hand into separate Mods).
+produce more than one Mod (a multi-mod archive is split by hand into separate Mods), and a
+Mod need not have one at all (loose folders and Imported v1 mods arrive without an archive).
 _Avoid_: Archive (use only when specifically talking about the file format, not the entity).
 
 **Mod**:
@@ -47,3 +48,22 @@ nesting) and exist only within a Profile — they are markers in that Profile's 
 sequence, and a Mod's group is whichever marker sits above it (implicit by position, not an
 explicit assignment). Group and separator are the same concept.
 _Avoid_: Separator (kept as a synonym in UI copy only; the domain term is Group).
+
+## Operations
+
+**Install**:
+Bringing new content into the library: an archive (which becomes a Download), a loose folder,
+or a loose set of pak files, turned into one or more Mods after the user confirms the detected
+Variant grouping and any multi-mod split.
+_Avoid_: Add, unpack.
+
+**Apply**:
+Re-extracting an existing Mod from a source — its own Download (reinstall), a newer Download
+(update), or its current folder when it has no Download — keeping the Mod's identity, metadata,
+Tags, and Profile entries. Reinstall and update are the same operation.
+_Avoid_: Reinstall/update as distinct concepts.
+
+**Import**:
+The one-time migration of a v1 watched folder into the library: each v1 mod folder becomes a
+Download-less Mod, with v1's edits, category, and enabled state carried over.
+_Avoid_: Migrate (reserved for database schema changes).
