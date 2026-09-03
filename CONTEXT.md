@@ -14,8 +14,8 @@ _Avoid_: Archive (use only when specifically talking about the file format, not 
 
 **Mod**:
 An extracted unit of moddable content, living under `mods/`. Holds its own metadata (name,
-author, category, tags) and one or more Variants. Hero/skin identification (scanned from pak
-asset paths) is cached at the Mod level.
+author, category, tags) and one or more Variants. The heroes and skins a Mod touches are the
+union of what its ModFiles were Scanned to contain.
 _Avoid_: Package, entry.
 
 **Variant**:
@@ -28,7 +28,8 @@ _Avoid_: Option, choice.
 **ModFile**:
 One mountable unit within a Variant: a `.pak`+`.ucas`+`.utoc` triple, or a lone legacy `.pak`.
 Sidecar discovery (matching `.ucas`/`.utoc` to a `.pak`'s stem) is a filesystem-level detail
-resolved at deploy time, not separate rows — a ModFile is never partially enabled.
+resolved at deploy time, not separate rows — a ModFile is never partially enabled. Each
+ModFile carries the hero/skin pairs its pak index was Scanned to contain (possibly none).
 _Avoid_: File (too generic — a ModFile may back onto several physical files).
 
 **Tag**:
@@ -36,6 +37,12 @@ A global, freeform label, many-to-many with Mod. Seeded from NexusMods categorie
 any session may add new ones. Tags and other Mod metadata are shared across all Profiles.
 _Avoid_: Category (Category is the single NexusMods-sourced classification; Tag is the
 open-ended many-per-mod label).
+
+**Roster**:
+The known mapping from the game's numeric hero and skin ids to display names. Seeded from a
+snapshot bundled with the app and refreshed from a public source; an id the Roster does not
+know is shown verbatim rather than hidden.
+_Avoid_: Hero list, character table.
 
 **Profile**:
 A named, ordered modlist: which Mods are enabled, which Variants of each are active, their
@@ -73,3 +80,11 @@ Attaching a NexusMods identity to a Download (its `(mod_id, file_id)`, found by 
 carried by the `nxm://` link) and pulling that mod's NexusMods metadata onto the resulting Mod.
 Happens at Install when a credential is present, or later on demand.
 _Avoid_: Link, match, lookup.
+
+**Scan**:
+Reading a ModFile's pak index for the hero/skin ids its asset paths name, run after
+extraction at Install and Apply. A Scan that finds nothing (unreadable index, or no character
+content) leaves the ModFile empty; the Mod's hero is then guessed from its NexusMods category
+or its name, as a Tag only. Heroes found by Scan or guess become Tags by name; skins are
+display text only.
+_Avoid_: Identify (reserved for the NexusMods identity), detect.
