@@ -67,3 +67,9 @@ _Avoid_: Reinstall/update as distinct concepts.
 The one-time migration of a v1 watched folder into the library: each v1 mod folder becomes a
 Download-less Mod, with v1's edits, category, and enabled state carried over.
 _Avoid_: Migrate (reserved for database schema changes).
+
+**Identify**:
+Attaching a NexusMods identity to a Download (its `(mod_id, file_id)`, found by md5 lookup or
+carried by the `nxm://` link) and pulling that mod's NexusMods metadata onto the resulting Mod.
+Happens at Install when a credential is present, or later on demand.
+_Avoid_: Link, match, lookup.
